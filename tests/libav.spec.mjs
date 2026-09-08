@@ -43,6 +43,40 @@ test.describe('remuxing', () => {
     }
   })
 
+  /*
+   * Fragments are cut on LENGTH while a seek is being served, and on keyframes the rest of the time.
+   *
+   * Before this a fragment WAS a GOP, so a seek could hand nothing back until a whole GOP had been
+   * muxed. On a file with ten second keyframes that is ten seconds of muxing for a seek that wanted a
+   * fraction of it.
+   *
+   * The two halves have to be asserted TOGETHER. On the fixtures every fragment used to be 2.00s, so
+   * "early fragments are short" alone is what separates the two builds, and "late fragments are whole
+   * GOPs again" alone passes on either. Cutting everywhere would cost ordinary playback 14% in round
+   * trips for a saving only a seek collects, which is what the second half guards.
+   */
+  test('a seek is served in short fragments, and playback goes back to whole GOPs', async ({ page }) => {
+    await open(page)
+    const result = await page.evaluate(() =>
+      window.harness.seek('h264-aac.mkv', [20], { reads: 24 }))
+    const step = result.steps[0]
+    const all = [step, ...step.after]
+    expect(all.length, 'not enough fragments to judge').toBeGreaterThan(14)
+
+    const mean = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length
+    const early = mean(all.slice(0, 6).map((f) => f.duration))
+    const late = mean(all.slice(-6).map((f) => f.duration))
+
+    // the fixtures are encoded with a 2s GOP, so anything near 2 means fragments are still whole GOPs
+    expect(early, `fragments right after a seek averaged ${early.toFixed(2)}s, the GOP is 2s`).toBeLessThan(1.4)
+    expect(late, `fragments stayed short outside the window, at ${late.toFixed(2)}s`).toBeGreaterThan(1.8)
+
+    // pts advances across every fragment, which is what cutting inside a GOP is most likely to break
+    for (let i = 1; i < all.length; i++) {
+      expect(all[i].pts, `fragment ${i} did not advance`).toBeGreaterThan(all[i - 1].pts)
+    }
+  })
+
   test('MediaSource accepts the output', async ({ page }) => {
     await open(page)
     const result = await page.evaluate(() => window.harness.playable('h264-aac.mkv'))

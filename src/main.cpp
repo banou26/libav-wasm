@@ -246,6 +246,60 @@ public:
   double pts = 0;
   int64_t pos = 0;
 
+  /**
+   * How much media one output fragment may cover, in seconds.
+   *
+   * With frag_keyframe a fragment WAS a GOP, so a file whose keyframes are ten seconds apart made a
+   * seek wait through ten seconds of muxing to get anything back, however little of it was wanted.
+   *
+   * Measured over twelve seeks of a 1080p HEVC file whose keyframes average 2.84s apart, against the
+   * same file at GOP fragments: 258ms median and 288ms mean before, 227ms and 264ms after. A file
+   * already keyframed every two seconds barely moves, 191ms to 179ms, which is the point: this
+   * removes the overshoot past what a seek needs, and a short GOP never had any.
+   *
+   * The rest of a seek is not overshoot and this cannot touch it. A seek has to mux from the keyframe
+   * to the target plus the runway the caller builds, and at roughly 33ms per second of media that is
+   * most of what remains.
+   *
+   * Not smaller than one second without a reason: every fragment carries a moof header and the pump
+   * reads one per call, so halving this doubles the round trips. 0.5s measured no better.
+   */
+  static constexpr double FRAGMENT_SECONDS = 1.0;
+
+  /*
+   * The fragment being written, tracked separately from the keyframe bookkeeping above.
+   *
+   * frag_custom hands the decision of where a fragment ends to this class, so a fragment is no longer
+   * a GOP and prev_pts/prev_duration can no longer describe one: within a single GOP they would
+   * report the same pts for every fragment in it, which reads to the caller as a stream that never
+   * advances.
+   */
+  bool frag_open = false;
+  double frag_pts = 0;
+  int64_t frag_pos = 0;
+  double frag_seconds = 0;
+
+  /**
+   * How far past a seek target fragments are cut on LENGTH rather than on keyframes, in seconds.
+   *
+   * Cutting everywhere costs more than it saves. Measured over 60s of continuous reading, one second
+   * fragments took 58 worker round trips and 1705ms where GOP fragments took 13 and 1489ms, so
+   * ordinary playback pays 14% for a saving only a seek collects. Outside this window the muxer goes
+   * back to a fragment per GOP, which is what playback wants.
+   *
+   * Wide enough to cover what a seek actually reads: the distance back to the keyframe plus the
+   * runway the caller builds before it moves the playhead.
+   */
+  static constexpr double SEEK_FRAGMENT_WINDOW = 12.0;
+  /** Media time up to which the window above applies, or negative when no seek is being served. */
+  double cut_on_length_until = -1;
+
+  /* The fragment closed during this read, which is the one being reported. */
+  bool frag_closed = false;
+  double closed_pts = 0;
+  int64_t closed_pos = 0;
+  double closed_seconds = 0;
+
   std::string video_mime_type;
   std::string audio_mime_type;
 
@@ -1282,7 +1336,9 @@ public:
     AVDictionary* opts = nullptr;
     av_dict_set(&opts, "strict", "experimental", 0);
     av_dict_set(&opts, "c", "copy", 0);
-    av_dict_set(&opts, "movflags", "frag_keyframe+empty_moov+default_base_moof", 0);
+    // frag_custom rather than frag_keyframe: this class closes fragments itself, on FRAGMENT_SECONDS,
+    // so a long GOP no longer decides how much muxing a caller waits through. See FRAGMENT_SECONDS.
+    av_dict_set(&opts, "movflags", "frag_custom+empty_moov+default_base_moof", 0);
 
     // synchronously drives the custom avio_write, which is how the mp4 init segment lands in write_vector and is returned as result.data
     int ret = avformat_write_header(output_format_context, &opts);
@@ -1301,6 +1357,15 @@ public:
     duration = 0;
     pts = 0;
     pos = 0;
+    frag_open = false;
+    frag_pts = 0;
+    frag_pos = 0;
+    frag_seconds = 0;
+    frag_closed = false;
+    closed_pts = 0;
+    closed_pos = 0;
+    closed_seconds = 0;
+    cut_on_length_until = -1;
   }
 
   void clear_attachments() {
@@ -1683,6 +1748,7 @@ public:
 
     write_vector.clear();
     subtitles.clear();
+    frag_closed = false;
 
     bool finished = false;
 
@@ -1788,7 +1854,11 @@ public:
 
       bool is_keyframe = packet->flags & AV_PKT_FLAG_KEY;
 
-      duration += packet->duration * av_q2d(in_stream->time_base);
+      // taken before the rescale, which reinterprets both fields in the output's time base
+      const double packet_seconds = packet->duration * av_q2d(in_stream->time_base);
+      const int64_t packet_pos = packet->pos;
+
+      duration += packet_seconds;
       av_packet_rescale_ts(packet, in_stream->time_base, out_stream->time_base);
 
       if (after_seek && packet->dts != AV_NOPTS_VALUE) {
@@ -1823,6 +1893,43 @@ public:
         }
       }
 
+      /*
+       * Where one fragment ends and the next begins, decided here rather than by the muxer.
+       *
+       * A fragment is closed BEFORE the packet that starts the next one is written, which is what
+       * lets the closed fragment be reported while the packet in hand belongs to its successor. That
+       * ordering is why the keyframe case works at all: a fragment has to START at a keyframe to be
+       * decodable on its own, so the keyframe cannot be the packet that ends one.
+       *
+       * Two reasons to close. A keyframe, which is what frag_keyframe did and what playback wants,
+       * and length, but only while serving a seek. See SEEK_FRAGMENT_WINDOW for why length cutting is
+       * not worth doing the rest of the time.
+       */
+      const double packet_pts_seconds = packet->pts * av_q2d(out_stream->time_base);
+      const bool cutting_on_length =
+        cut_on_length_until >= 0 && packet_pts_seconds < cut_on_length_until;
+      const bool close_now =
+        frag_open && frag_seconds > 0 &&
+        (is_keyframe || (cutting_on_length && frag_seconds >= FRAGMENT_SECONDS));
+
+      if (close_now) {
+        closed_pts = frag_pts;
+        closed_pos = frag_pos;
+        closed_seconds = frag_seconds;
+        frag_closed = true;
+        // flushes the fragment, which drives avio_write and sets wrote
+        av_write_frame(output_format_context, nullptr);
+        frag_open = false;
+      }
+
+      if (!frag_open) {
+        frag_open = true;
+        frag_pts = packet_pts_seconds;
+        frag_pos = packet_pos;
+        frag_seconds = 0;
+      }
+      frag_seconds += packet_seconds;
+
       ret = av_interleaved_write_frame(output_format_context, packet);
       if (ret < 0) {
         printf("Error writing frame: %s\n", ffmpegErrStr(ret).c_str());
@@ -1849,13 +1956,21 @@ public:
     // newest one is still being written. Before a second keyframe has gone by they were never assigned, so
     // the newest one is all there is: mpegts flushes its first fragment before a second keyframe arrives
     // where matroska does not, and reporting the reset zero put every seek in a .ts at the start of file.
-    const bool have_previous = keyframes_since_reset > 1;
-
     result.data = js_write_vector;
     result.subtitles = subtitles;
-    result.offset = have_previous ? prev_pos : pos;
-    result.pts = have_previous ? prev_pts : pts;
-    result.duration = have_previous ? prev_duration : duration;
+    /*
+     * The fragment this call actually produced.
+     *
+     * The keyframe based prev_* pair it replaces described the GOP before the newest keyframe, which
+     * was the completed fragment only while a fragment WAS a GOP. Cutting on length breaks that:
+     * every fragment inside one GOP would report that GOP's pts, and libav-wasm's own suite catches
+     * it as "pts must advance, or the player stalls on a repeated segment".
+     */
+    // the fragment this call closed, or at EOF the one the trailer flushed
+    result.offset = frag_closed ? closed_pos : frag_pos;
+    result.pts = frag_closed ? closed_pts : frag_pts;
+    result.duration = frag_closed ? closed_seconds : frag_seconds;
+    frag_closed = false;
     result.cancelled = false;
     result.finished = finished;
 
@@ -1923,6 +2038,9 @@ public:
       read_data_function = val::undefined();
       return cancelled_result;
     }
+
+    // fragments are cut on length only while the caller is still assembling this seek
+    cut_on_length_until = timestamp + SEEK_FRAGMENT_WINDOW;
 
     ReadResult read_result = read(read_function);
     return read_result;

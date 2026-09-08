@@ -133,7 +133,7 @@ window.harness = {
     } finally { await instance.destroy() }
   },
 
-  async seek(name, targets, { bufferSize, workerUrl } = {}) {
+  async seek(name, targets, { bufferSize, workerUrl, reads = 0 } = {}) {
     const { length, read } = await sourceFor(name)
     const remuxer = await makeRemuxer({ ...common(length, read, workerUrl), ...(bufferSize ? { bufferSize } : {}) })
     try {
@@ -141,7 +141,14 @@ window.harness = {
       const steps = []
       for (const target of targets) {
         const chunk = await remuxer.seek(target)
-        steps.push({ target, pts: chunk.pts, bytes: chunk.data?.byteLength ?? 0 })
+        // `after` is what shows where fragments stop being cut on length and go back to one per GOP
+        const after = []
+        for (let i = 0; i < reads; i++) {
+          const next = await remuxer.read()
+          if (!next?.data?.byteLength) break
+          after.push({ pts: next.pts, duration: next.duration })
+        }
+        steps.push({ target, pts: chunk.pts, duration: chunk.duration, bytes: chunk.data?.byteLength ?? 0, after })
       }
       return { steps }
     } finally { await remuxer.destroy() }
