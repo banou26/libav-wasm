@@ -209,8 +209,13 @@ export const FIXTURES = [
     args: [
       '-filter:v:0', colourByTime,
       '-g', String(GOP), '-keyint_min', String(GOP), '-sc_threshold', '0',
-      '-c:v:0', 'libx264', '-preset', 'ultrafast', '-crf', '20', '-pix_fmt', 'yuv420p',
-      '-c:v:1', 'mjpeg', '-c:a', 'aac',
+      '-c:v:0', 'libx264', '-preset', 'ultrafast', '-crf', '20', '-pix_fmt:v:0', 'yuv420p',
+      // mjpeg's formats are the full-range yuvj ones, and an unqualified -pix_fmt reaches BOTH video
+      // outputs. Left as yuv420p the encoder refuses to open at all on a stricter ffmpeg than this
+      // machine's ("Non full-range YUV is non-standard"), which fails fixture generation and takes
+      // every test in the suite with it. Naming the format per stream is the fix; lowering
+      // strict_std_compliance would only hide it.
+      '-c:v:1', 'mjpeg', '-pix_fmt:v:1', 'yuvj420p', '-c:a', 'aac',
     ],
   },
   {
