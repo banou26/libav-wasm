@@ -133,13 +133,21 @@ window.harness = {
     } finally { await instance.destroy() }
   },
 
-  async seek(name, targets, { bufferSize, workerUrl, reads = 0 } = {}) {
+  async seek(name, targets, { bufferSize, workerUrl, reads = 0, audioCodecs } = {}) {
     const { length, read } = await sourceFor(name)
-    const remuxer = await makeRemuxer({ ...common(length, read, workerUrl), ...(bufferSize ? { bufferSize } : {}) })
+    // where each seek read from, so a test can assert what a seek does NOT have to fetch
+    let offsets = null
+    const traced = (offset, size) => { if (offsets) offsets.push(offset); return read(offset, size) }
+    const remuxer = await makeRemuxer({
+      ...common(length, traced, workerUrl),
+      ...(bufferSize ? { bufferSize } : {}),
+      ...(audioCodecs ? { audioCodecs } : {}),
+    })
     try {
       await remuxer.init()
       const steps = []
       for (const target of targets) {
+        offsets = []
         const chunk = await remuxer.seek(target)
         // `after` is what shows where fragments stop being cut on length and go back to one per GOP
         const after = []
@@ -148,9 +156,12 @@ window.harness = {
           if (!next?.data?.byteLength) break
           after.push({ pts: next.pts, duration: next.duration })
         }
-        steps.push({ target, pts: chunk.pts, duration: chunk.duration, bytes: chunk.data?.byteLength ?? 0, after })
+        steps.push({
+          target, pts: chunk.pts, duration: chunk.duration,
+          bytes: chunk.data?.byteLength ?? 0, after, offsets: offsets.slice(),
+        })
       }
-      return { steps }
+      return { steps, length }
     } finally { await remuxer.destroy() }
   },
 

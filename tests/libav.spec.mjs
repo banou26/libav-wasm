@@ -293,6 +293,34 @@ test.describe('seeking', () => {
     expect(Math.abs(first.pts - 8)).toBeLessThanOrEqual(3)
   })
 
+  /**
+   * A seek must not re-read the container header.
+   *
+   * `seek` used to close the input and open it again, which made lavf parse the header from scratch every
+   * time. For matroska that means the cues, and those sit at the TAIL of the file: on a 1.2 GB episode it
+   * was a 583 KB read from the far end, per seek, for an index the still-open context already held. Over
+   * a torrent that is pieces nothing had asked for.
+   *
+   * Asserted as "nothing near the end of the file was read", because that is the observable shape of the
+   * reopen and it does not depend on how lavf chooses to size its reads.
+   */
+  test('a seek does not re-read the container header', async ({ page }) => {
+    await open(page)
+    // a small buffer on purpose: the whole fixture fits inside the default 2.5 MB read-ahead, so a seek
+    // there needs no reads at all and the test would pass without being able to fail
+    const { steps, length } = await page.evaluate(() =>
+      window.harness.seek('h264-aac.mkv', [30, 10, 45], { bufferSize: 65_536 }))
+
+    for (const step of steps) {
+      expect(step.offsets.length, `seek(${step.target}) read nothing at all`).toBeGreaterThan(0)
+      // the reopen's signature: the ebml header at the front, then the cues at the back
+      const header = step.offsets.filter((offset) => offset < length * 0.1)
+      const cues = step.offsets.filter((offset) => offset > length * 0.9)
+      expect(header, `seek(${step.target}) re-read the header at ${header} of ${length}`).toEqual([])
+      expect(cues, `seek(${step.target}) re-read the cues at ${cues} of ${length}`).toEqual([])
+    }
+  })
+
   // mov timescales are not 1/1000, which is the only reason an unrescaled millisecond value ever worked
   test('seeking is correct in a container whose time base is not 1/1000', async ({ page }) => {
     await open(page)

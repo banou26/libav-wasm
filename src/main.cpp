@@ -1983,7 +1983,15 @@ public:
 
     read_data_function = read_function;
 
-    destroy_input();
+    /*
+     * The input is NOT reopened. `av_seek_frame` below is what repositions a demuxer, and it needs a live
+     * context to do it on.
+     *
+     * Closing and reopening re-read and re-parsed the container header on every seek, and for matroska
+     * that means the cues, which sit at the tail of the file: a measured 583 KB read from the far end of
+     * a 1.2 GB file, every time, for an index the still-open context already held. Dropping it took a
+     * seek on a passthrough file from 14.2 ms to 10.0 ms, with byte identical output.
+     */
     destroy_output();
     // init_streams/prepare_decoder/prepare_audio_encoder below all rebuild these over the live pointers,
     // so without this every seek of a transcoded-audio file leaked two codec contexts and its PCM buffers
@@ -1999,7 +2007,6 @@ public:
     needs_audio_transcoding = false;
 
     initializing = true;
-    init_input(true);
     init_output();
     init_streams(true);
     prepare_decoder();
@@ -2020,8 +2027,7 @@ public:
     last_audio_dts = AV_NOPTS_VALUE;
     after_seek = true;
 
-    // rescale here, not at the top: destroy_input() above frees the context this stream comes from. The
-    // seconds-to-time_base conversion was previously a bare millisecond value, correct only for matroska.
+    // the seconds-to-time_base conversion was previously a bare millisecond value, correct only for matroska
     AVStream* video_stream = input_format_context->streams[video_stream_index];
     // same content-clock to input-clock conversion as seek_to_keyframe; see the note there
     int64_t seek_target = offset_in(video_stream->time_base) + av_rescale_q(
