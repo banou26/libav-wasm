@@ -44,9 +44,12 @@ const centrePixel = async (png) => {
 }
 
 window.harness = {
-  async remux(name, { workerUrl } = {}) {
+  async remux(name, { workerUrl, audioCodecs } = {}) {
     const { length, read } = await sourceFor(name)
-    const remuxer = await makeRemuxer(common(length, read, workerUrl))
+    const remuxer = await makeRemuxer({
+      ...common(length, read, workerUrl),
+      ...(audioCodecs ? { audioCodecs } : {}),
+    })
     try {
       const init = await remuxer.init()
       const segments = []
@@ -62,6 +65,19 @@ window.harness = {
         duration: init.info.input.duration,
         indexCount: init.indexes.length,
         subtitleCount: init.subtitles.length,
+        // the first four bytes of each top level box's type, so a test can tell an init segment from media
+        initBoxes: (() => {
+          const bytes = init.data instanceof Uint8Array ? init.data : new Uint8Array(init.data)
+          const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+          const found = []
+          for (let at = 0; at + 8 <= view.byteLength && found.length < 8;) {
+            const size = view.getUint32(at)
+            found.push(String.fromCharCode(...bytes.subarray(at + 4, at + 8)))
+            if (size <= 0) break
+            at += size
+          }
+          return found
+        })(),
         segments,
       }
     } finally { await remuxer.destroy() }

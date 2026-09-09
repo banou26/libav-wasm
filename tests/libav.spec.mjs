@@ -116,6 +116,41 @@ test.describe('remuxing', () => {
     expect(result.subtitleCount).toBeGreaterThan(0)
     expect(result.segments[0].bytes).toBeGreaterThan(0)
   })
+
+  /**
+   * Audio is transcoded only because a browser will not take the codec, so the browser is asked.
+   *
+   * That answer is not fixed: the same Chrome takes ec-3 on Windows and refuses it on Linux, and the old
+   * hardcoded list therefore re-encoded for everyone to satisfy the strictest one. On the file this came
+   * from, encoding aac was 80% of a seek, so passing the stream through instead took seek-to-playable from
+   * 115 ms to 11 ms, bit exact, where the browser can decode it.
+   *
+   * Both halves matter. Without the default half, a build that passed EVERYTHING through would pass, and
+   * that ships silent audio to every browser without an ac3 decoder.
+   */
+  test('audio is passed through when the browser can decode it, and re-encoded when it cannot', async ({ page }) => {
+    await open(page)
+
+    // the default list is what a browser with no ac3 decoder reports, so this must still re-encode
+    const reEncoded = await page.evaluate(() => window.harness.remux('h264-eac3.mkv'))
+    expect(reEncoded.audioMimeType).toMatch(/^mp4a\./)
+
+    const passedThrough = await page.evaluate(() =>
+      window.harness.remux('h264-eac3.mkv', { audioCodecs: ['aac', 'opus', 'flac', 'ac3', 'eac3'] }))
+    expect(passedThrough.audioMimeType).toBe('ec-3')
+
+    /*
+     * eac3 cannot have its sample entry written before a packet is parsed, so it needs `delay_moov`, and
+     * a delayed moov is why `init` has to produce one itself. Without that this returns zero bytes and no
+     * player can start, which no mime type assertion would catch.
+     */
+    expect(passedThrough.initBoxes, 'init did not return an init segment').toContain('moov')
+    expect(passedThrough.initBytes).toBeGreaterThan(0)
+    expect(passedThrough.segments[0].bytes).toBeGreaterThan(0)
+    for (let i = 1; i < passedThrough.segments.length; i++) {
+      expect(passedThrough.segments[i].pts).toBeGreaterThan(passedThrough.segments[i - 1].pts)
+    }
+  })
 })
 
 // One case per REASON a container used to fail, not one per extension. Every one of these produced either
@@ -238,6 +273,7 @@ test.describe('containers', () => {
     for (const shot of result.shots) expectFrameAt(shot, shot.t)
   })
 })
+
 
 test.describe('seeking', () => {
   test('seeks land on the requested position, forwards and backwards', async ({ page }) => {

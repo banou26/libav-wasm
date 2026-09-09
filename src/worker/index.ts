@@ -101,6 +101,8 @@ export type RemuxerInstanceOptions = {
   length: number
   bufferSize: number
   audioStreamIndex?: number
+  /** codec names the caller's browser accepts in an mp4; anything else is re-encoded to aac */
+  audioCodecs?: string[]
 }
 
 type ReadFunction = (offset: number, size: number) => Promise<{
@@ -313,17 +315,19 @@ const withReadableErrors = <T extends object>(module: EmscriptenModule, instance
 
 const resolvers = {
   makeRemuxer: async (
-    { publicPath, length, bufferSize, audioStreamIndex }:
+    { publicPath, length, bufferSize, audioStreamIndex, audioCodecs }:
     {
       publicPath: string
       length: number
       bufferSize: number
       audioStreamIndex?: number
+      /** codec names the caller's browser accepts in an mp4; anything else is re-encoded to aac */
+      audioCodecs?: string[]
     }
   ) => {
     // this module should not be destructured as the HEAPU8 variable changes if the heap needs to grow
     const module = await makeModule(publicPath)
-    const _remuxer = withReadableErrors(module, new module.Remuxer({ resolvedPromise: Promise.resolve(), length, bufferSize, audioStreamIndex }))
+    const _remuxer = withReadableErrors(module, new module.Remuxer({ resolvedPromise: Promise.resolve(), length, bufferSize, audioStreamIndex, audioCodecs }))
     const remuxer = {
       initThumbnail: (read) => _remuxer.initThumbnail(read).then((result: ThumbnailInitResult) => ({
         duration: result.duration,

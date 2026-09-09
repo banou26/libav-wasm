@@ -7,6 +7,7 @@
 #include <cstring>
 #include <numeric>
 #include <algorithm>
+#include <set>
 
 extern "C" {
   #include <libavformat/avio.h>
@@ -56,19 +57,18 @@ static inline std::string ffmpegErrStr(int errnum) {
  * is a codec that cannot reach a browser, and a second list beside it would only be something to disagree
  * with.
  */
-static inline bool audio_passthrough_ok(AVCodecID codec_id) {
-  return codec_id == AV_CODEC_ID_AAC
-    || codec_id == AV_CODEC_ID_OPUS
-    || codec_id == AV_CODEC_ID_FLAC;
+static inline const char* audio_passthrough_name(AVCodecID codec_id) {
+  switch (codec_id) {
+    case AV_CODEC_ID_AAC:  return "aac";
+    case AV_CODEC_ID_OPUS: return "opus";
+    case AV_CODEC_ID_FLAC: return "flac";
+    case AV_CODEC_ID_AC3:  return "ac3";
+    case AV_CODEC_ID_EAC3: return "eac3";
+    default:               return nullptr;
+  }
 }
 
-// Everything else audio, from ac3 and dts through vorbis, mp3, wma and raw pcm, re-encodes to aac rather
-// than being dropped. Video has no equivalent: re-encoding it is far too expensive to do live.
-static inline bool needs_transcoding_to_aac(AVCodecID codec_id) {
-  return !audio_passthrough_ok(codec_id)
-    && avcodec_find_decoder(codec_id) != nullptr
-    && avcodec_find_encoder(AV_CODEC_ID_AAC) != nullptr;
-}
+
 
 typedef struct MediaInfo {
   std::string formatName;
@@ -332,11 +332,53 @@ public:
   AVPacket* packet = nullptr;
   bool wrote = false;
 
+  /** names from `audio_passthrough_name` that the caller's browser will accept in an mp4 */
+  std::set<std::string> browser_audio_codecs;
+  /** set between write_header and the delayed moov reaching avio_write */
+  bool header_pending = false;
+
+  /** audio reaches the browser untouched only if the muxer can carry it AND the browser can decode it */
+  bool audio_passthrough_ok(AVCodecID codec_id) const {
+    const char* name = audio_passthrough_name(codec_id);
+    return name && browser_audio_codecs.count(name) > 0;
+  }
+
+  // Everything else audio, from dts through vorbis, mp3, wma and raw pcm, re-encodes to aac rather than
+  // being dropped. Video has no equivalent: re-encoding it is far too expensive to do live.
+  bool needs_transcoding_to_aac(AVCodecID codec_id) const {
+    return !audio_passthrough_ok(codec_id)
+      && avcodec_find_decoder(codec_id) != nullptr
+      && avcodec_find_encoder(AV_CODEC_ID_AAC) != nullptr;
+  }
+
+  /** ac3 and eac3 fill their mp4 sample entry from the first packet, so the moov cannot be written yet */
+  bool needs_delayed_moov() const {
+    if (!output_format_context) return false;
+    for (unsigned int i = 0; i < output_format_context->nb_streams; i++) {
+      const AVCodecID id = output_format_context->streams[i]->codecpar->codec_id;
+      if (id == AV_CODEC_ID_AC3 || id == AV_CODEC_ID_EAC3) return true;
+    }
+    return false;
+  }
+
   Remuxer(emscripten::val options) {
     resolved_promise = options["resolvedPromise"];
     input_length = options["length"].as<double>();
     buffer_size = options["bufferSize"].as<int>();
     selected_audio_index = options["audioStreamIndex"].isUndefined() ? -1 : options["audioStreamIndex"].as<int>();
+    /*
+     * No list means the set every build passed through before the browser was asked.
+     *
+     * The fallback NARROWS rather than widens: handing a browser a codec it cannot decode fails as silent
+     * audio rather than as an error, which is far worse than a transcode that was not needed.
+     */
+    emscripten::val codecs = options["audioCodecs"];
+    if (codecs.isUndefined() || codecs.isNull()) {
+      browser_audio_codecs = { "aac", "opus", "flac" };
+    } else {
+      const int count = codecs["length"].as<int>();
+      for (int i = 0; i < count; i++) browser_audio_codecs.insert(codecs[i].as<std::string>());
+    }
     needs_audio_transcoding = false;
     next_audio_pts = 0;
     audio_pts_initialized = false;
@@ -400,6 +442,8 @@ public:
       case AV_CODEC_ID_AAC:  return parse_mp4a_mime_type(in_codecpar);
       case AV_CODEC_ID_OPUS: return "opus";
       case AV_CODEC_ID_FLAC: return "flac";
+      case AV_CODEC_ID_EAC3: return "ec-3";
+      case AV_CODEC_ID_AC3:  return "ac-3";
       default:               return "";
     }
   }
@@ -1338,7 +1382,23 @@ public:
     av_dict_set(&opts, "c", "copy", 0);
     // frag_custom rather than frag_keyframe: this class closes fragments itself, on FRAGMENT_SECONDS,
     // so a long GOP no longer decides how much muxing a caller waits through. See FRAGMENT_SECONDS.
-    av_dict_set(&opts, "movflags", "frag_custom+empty_moov+default_base_moof", 0);
+    /*
+     * `delay_moov` is added ONLY for the codecs that cannot go without it.
+     *
+     * ac3 and eac3 fill their mp4 sample entry from the first packet, so empty_moov on its own fails
+     * outright with "Cannot write moov atom before EAC3 packets parsed". delay_moov holds the moov back
+     * until that packet has been muxed. Everything else keeps the old flags, and the old bytes, which is
+     * why this is conditional rather than always on.
+     */
+    header_pending = needs_delayed_moov();
+    av_dict_set(
+      &opts,
+      "movflags",
+      header_pending
+        ? "frag_custom+empty_moov+default_base_moof+delay_moov"
+        : "frag_custom+empty_moov+default_base_moof",
+      0
+    );
 
     // synchronously drives the custom avio_write, which is how the mp4 init segment lands in write_vector and is returned as result.data
     int ret = avformat_write_header(output_format_context, &opts);
@@ -1732,6 +1792,26 @@ public:
       result.video_extradata.assign(
         in_codecpar->extradata,
         in_codecpar->extradata + in_codecpar->extradata_size
+      );
+    }
+
+    /*
+     * A delayed moov means there is nothing to hand back yet, so one read is done here to produce it.
+     *
+     * Placed AFTER the index walk on purpose: that walk seeks the input back to zero, so the packets this
+     * consumes are the ones the caller's first `read` would have taken anyway, rather than a set that
+     * would then be muxed a second time.
+     */
+    if (header_pending) {
+      std::vector<SubtitleFragment> header_subtitles = subtitles;
+      read(read_function);
+      // read() cleared `subtitles` and refilled it from the fragment, so the stream headers collected in
+      // init_streams have to go back in front of them
+      header_subtitles.insert(header_subtitles.end(), subtitles.begin(), subtitles.end());
+      result.subtitles = header_subtitles;
+      // reassigned because read() may have reallocated write_vector, leaving the earlier view dangling
+      result.data = emscripten::val(
+        emscripten::typed_memory_view(write_vector.size(), write_vector.data())
       );
     }
 
@@ -2165,7 +2245,19 @@ private:
   static int avio_write_impl(void* opaque, const uint8_t* buf, int buf_size) {
     Remuxer* self = reinterpret_cast<Remuxer*>(opaque);
 
-    self->wrote = true;
+    /*
+     * A delayed moov arrives here as an ordinary write, and it must NOT end the read that produced it.
+     *
+     * `wrote` is what breaks the read loop, so counting the header as a fragment returned ftyp+moov on its
+     * own and pushed the media a call later, which then merged two fragments into one read. Swallowing
+     * exactly the first write after the header lets the read carry on to a real fragment boundary, so a
+     * caller still gets one appendable block.
+     */
+    if (self->header_pending) {
+      self->header_pending = false;
+    } else {
+      self->wrote = true;
+    }
     self->write_vector.insert(self->write_vector.end(), buf, buf + buf_size);
 
     return buf_size;

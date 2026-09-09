@@ -5,6 +5,44 @@ import type { SubtitleFragment } from './worker'
 import { expose, transfer } from 'osra'
 export * from './utils'
 
+/**
+ * The codecs a browser might take in an mp4, and the string to ask about each one by.
+ *
+ * `MediaSource.isTypeSupported` is the oracle, and `canPlayType` is NOT a substitute: Chrome answers
+ * "probably" for mp3 in mp4 and then refuses the same type in MediaSource, so trusting the element would
+ * pass through audio that never decodes.
+ */
+const AUDIO_PROBES: readonly (readonly [string, string])[] = [
+  ['aac', 'audio/mp4; codecs="mp4a.40.2"'],
+  ['opus', 'audio/mp4; codecs="opus"'],
+  ['flac', 'audio/mp4; codecs="flac"'],
+  ['ac3', 'audio/mp4; codecs="ac-3"'],
+  ['eac3', 'audio/mp4; codecs="ec-3"'],
+]
+
+/** what every build passed through before the browser was asked, and the answer when it cannot be */
+const DEFAULT_AUDIO_CODECS = ['aac', 'opus', 'flac']
+
+/**
+ * Which audio codecs this browser will accept in an mp4, asked rather than assumed.
+ *
+ * Transcoding costs the majority of a seek on the files that need it, and it exists only because a
+ * browser will not take the codec. That answer is not fixed: the same Chrome takes ec-3 on Windows and
+ * refuses it on Linux, so a hardcoded list transcodes for everyone to satisfy the strictest browser.
+ *
+ * Narrows rather than widens on any doubt. A browser handed a codec it cannot decode fails as silent
+ * audio, not as an error, which is far worse than a transcode that was not needed.
+ */
+export const supportedAudioCodecs = (): string[] => {
+  const mediaSource = (globalThis as { MediaSource?: typeof MediaSource }).MediaSource
+  if (typeof mediaSource?.isTypeSupported !== 'function') return [...DEFAULT_AUDIO_CODECS]
+  const supported = AUDIO_PROBES
+    .filter(([, type]) => { try { return mediaSource.isTypeSupported(type) } catch { return false } })
+    .map(([name]) => name)
+  // a browser that says no to aac is answering wrong, not describing itself
+  return supported.includes('aac') ? supported : [...DEFAULT_AUDIO_CODECS]
+}
+
 export type MakeTransmuxerOptions = {
   /** Path that will be used to locate the .wasm file imported from the worker */
   publicPath: string
@@ -26,6 +64,12 @@ export type MakeTransmuxerOptions = {
    * rather than cloning measured 15% off a session, since the whole payload crosses the hop every read.
    */
   transferReads?: boolean
+  /**
+   * Audio codecs to pass through instead of re-encoding, by the names `supportedAudioCodecs` returns.
+   * Defaults to asking this browser. Pass a narrower list to override, never a wider one than the
+   * playback target can decode.
+   */
+  audioCodecs?: string[]
 }
 
 const abortSignalToPromise = (abortSignal: AbortSignal) =>
@@ -52,6 +96,7 @@ const makeSession = async ({
   length,
   bufferSize,
   audioStreamIndex,
+  audioCodecs,
   transferReads = true
 }: MakeTransmuxerOptions & { bufferSize: number }) => {
   const worker = new Worker(workerUrl, workerOptions)
@@ -62,7 +107,8 @@ const makeSession = async ({
     publicPath,
     length,
     bufferSize,
-    audioStreamIndex
+    audioStreamIndex,
+    audioCodecs: audioCodecs ?? supportedAudioCodecs()
   })
 
   const queue = new PQueue({ concurrency: 1 })
