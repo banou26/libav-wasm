@@ -1,6 +1,10 @@
 {
   "name": "libav-wasm",
   "version": "0.8.7",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Banou26/libav-wasm.git"
+  },
   "main": "build/index.js",
   "files": [
     "build"

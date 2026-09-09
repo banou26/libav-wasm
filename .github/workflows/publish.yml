@@ -1,70 +1,239 @@
-name: Create and publish a package
+# Publishes libav-wasm to npmjs when its version changes, with no npm token anywhere.
+#
+# THE FILENAME IS PART OF THE TRUST RELATIONSHIP AND MUST NOT CHANGE. npm trusted publishing binds
+# the package to a repository PLUS a workflow filename, and this file is the one registered on
+# npmjs.com for Banou26/libav-wasm. The `name:` below is display text and is safe to edit;
+# `publish.yml` is not. Renaming it, or the repository, stops every publish with an auth error that
+# reads like a revoked credential.
+#
+# One workflow rather than the test-then-publish pair the other repos use, because here the build is
+# the expensive part: `npm run build` compiles ffmpeg and the module through emscripten in docker and
+# takes about ten minutes. Split across two workflows that would be paid twice, and the second build
+# could differ from the one the tests passed against. Instead the wasm is built once, tested, and
+# THAT artifact is what gets published.
+#
+# What this replaces: a job that pushed a prerelease to GitHub Packages on every push. It had never
+# succeeded (the build ahead of it failed on every run since the Vite+ migration, because it pinned
+# Node 19, which cannot load vite-plus's extensionless `bin/vp`), it had no consumer, and it could not
+# have worked regardless: npm.pkg.github.com requires the package name to be scoped to the repository
+# owner, and this package is the unscoped `libav-wasm`.
+name: Publish libav-wasm
+
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
+  # for re-running a publish that failed after the version already landed, which a push cannot repeat
+  workflow_dispatch:
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+    # the docker build alone is ~10 minutes on a cold runner, and it compiles ffmpeg from source
+    timeout-minutes: 60
     steps:
-    - uses: actions/checkout@v3
-    - name: Use Node.js 19.x
-      uses: actions/setup-node@v3
-      with:
-        node-version: 19.x
-    - run: npm ci
+      - uses: actions/checkout@v4
 
-    - run: npm run build
-
-    - name: Upload build folder artifacts
-      uses: actions/upload-artifact@v4
-      with:
-          name: build
-          path: "build/*"
-
-  package:
-    needs: [build]
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v3
-      - name: Use Node.js 19.x
-        uses: actions/setup-node@v3
+      # Node 24, not 19. The repo builds through Vite+, whose `bin/vp` has no file extension, and
+      # Node 19 refuses to load an extensionless file inside a "type": "module" package. That is the
+      # error every run of the old workflow died on, and it reads as a broken dependency rather than
+      # a stale runtime.
+      - uses: actions/setup-node@v4
         with:
-          node-version: 19.x
+          node-version: 24
+          cache: npm
 
-      - name: Download build folder artifacts
-        uses: actions/download-artifact@v4
-        with:
-            name: build
-            path: ./build
+      - run: npm ci
 
-      - run: npm version prerelease --preid=ci-$GITHUB_RUN_ID --no-git-tag-version
-      - run: npm pack
+      # fixtures/ is gitignored, so a fresh checkout has no test media at all: scripts/fixtures.mjs
+      # synthesizes every file with ffmpeg rather than carrying megabytes in git history.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
 
-      - name: Upload
+      # playwright.config.mjs resolves a real Chrome from PATH and falls back to playwright's own
+      # download. Proprietary codec support is a property of the binary, so this fallback has to exist
+      # or the hevc paths silently go untested.
+      - run: npx playwright install --with-deps chromium
+
+      # ubuntu images restrict the unprivileged user namespace Chrome's sandbox opens, so lift the
+      # restriction rather than dropping the sandbox.
+      - name: Allow the Chrome sandbox to open a user namespace
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      # emscripten, ffmpeg, both wasm variants, the worker bundle and the types
+      - run: npm run build
+
+      # Both wasm builds, because the worker picks between them on WebAssembly.Suspending and the
+      # Asyncify one is what every Safari user gets.
+      - run: npm test
+
+      - name: Keep the tested artifact
         uses: actions/upload-artifact@v4
         with:
-            name: package
-            path: "*.tgz"
+          name: build
+          path: build
+          if-no-files-found: error
+          retention-days: 7
+
+      # a failed browser assertion leaves its evidence in the report, not in the log
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
 
   publish:
-    name: "Publish to GitHub Packages"
-    needs: [package]
-    runs-on: ubuntu-22.04
-    if: github.repository_owner == 'banou26'
+    needs: [build]
+    # a pull request builds and tests, and publishes nothing
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      # the OIDC token npm exchanges for short-lived publish credentials. Without it the job has no
+      # way to authenticate at all, because there is deliberately no token secret anywhere.
+      id-token: write
+      # only to push the release tag
+      contents: write
+
     steps:
-    - name: Download package artifact
-      uses: actions/download-artifact@v4
-      with:
-          name: package
-    - uses: actions/setup-node@v3
-      with:
-        node-version: 19.x
-        registry-url: https://npm.pkg.github.com/
-        scope: "@banou26"
-    - run: echo "registry=https://npm.pkg.github.com/@banou26" >> .npmrc
-    - run: npm publish $(ls *.tgz)
-      env:
-        NODE_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
+      - uses: actions/checkout@v4
+
+      # NO registry-url on purpose. That input writes an .npmrc pinning auth to ${NODE_AUTH_TOKEN},
+      # which is empty here; npm then believes it is authenticated, skips the OIDC exchange entirely,
+      # and the publish dies with an E404 on the PUT. registry.npmjs.org is the default anyway.
+      #
+      # NO `cache: npm` either: setup-node registers a post-job step that saves the cache, and this
+      # job never installs, so that post-step errors and the JOB goes red while every step in it
+      # reports success.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      # Trusted publishing needs npm >= 11.5.1. Node 24 ships something recent enough today, which is
+      # exactly why this runs rather than being assumed: the day the runner image moves, an unpinned
+      # npm would fail at the publish step with an auth error that looks like a revoked credential
+      # rather than a stale CLI.
+      - name: Use an npm that supports trusted publishing
+        run: |
+          npm install -g npm@latest
+          echo "npm $(npm --version)"
+
+      # Compared against the REGISTRY rather than against the previous commit, which makes this
+      # idempotent: a publish that failed halfway is retried correctly, and a re-run of a successful
+      # one is a no-op. A git diff would report "changed" on the retry and "unchanged" on the re-run,
+      # and both are wrong.
+      #
+      # THREE outcomes, not two, because "the registry says 0.8.6" and "the registry did not answer"
+      # are different facts and only one of them is evidence.
+      - name: Decide whether the version moved
+        id: decide
+        run: |
+          LOCAL=$(node -p "require('./package.json').version")
+          echo "local=$LOCAL" >> "$GITHUB_OUTPUT"
+
+          set +e
+          PUBLISHED=$(cd "${RUNNER_TEMP:-/tmp}" && npm view libav-wasm version 2>/tmp/npm-view.err)
+          VIEW_CODE=$?
+          set -e
+
+          if [ "$VIEW_CODE" -eq 0 ] && [ -n "$PUBLISHED" ]; then
+            :
+          elif grep -q 'E404' /tmp/npm-view.err; then
+            PUBLISHED=""
+            echo "::notice::libav-wasm is not on the registry; this would be its first publish."
+          else
+            echo "::error::could not read libav-wasm from the registry (exit $VIEW_CODE). Refusing to guess."
+            cat /tmp/npm-view.err
+            exit 1
+          fi
+
+          echo "published=$PUBLISHED" >> "$GITHUB_OUTPUT"
+          if [ "$LOCAL" = "$PUBLISHED" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::libav-wasm $LOCAL is already published; nothing to do."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::publishing libav-wasm ${PUBLISHED:-none} -> $LOCAL"
+          fi
+
+      # The artifact the tests actually ran against, not a second build that might differ from it.
+      - name: Take the tested build
+        if: steps.decide.outputs.changed == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: build
+          path: build
+
+      # Read the ARTIFACT, never the source that is supposed to produce it.
+      - name: Verify the artifact before it leaves the runner
+        if: steps.decide.outputs.changed == 'true'
+        run: |
+          ls -la build
+          node -e '
+            const { strict: assert } = require("node:assert")
+            const { existsSync, statSync } = require("node:fs")
+            const manifest = require("./package.json")
+            assert.equal(manifest.name, "libav-wasm")
+            assert.equal(manifest.version, process.env.LOCAL, "built version does not match package.json")
+
+            // everything the manifest points a consumer at has to be on disk, or the package resolves
+            // to nothing in their app rather than failing here
+            for (const entry of [manifest.main, manifest.types]) {
+              assert.ok(entry && existsSync(entry), `${entry} is named by package.json but was not built`)
+            }
+            // the worker and both wasm variants are loaded at RUNTIME by path, so no import graph
+            // would catch them missing
+            for (const file of ["build/worker.js", "build/libav.wasm", "build/libav-jspi.wasm"]) {
+              assert.ok(existsSync(file), `${file} is missing from the build`)
+              // a truncated wasm still exists and still publishes; these are ~9 and ~11 MB
+              const { size } = statSync(file)
+              if (file.endsWith(".wasm")) assert.ok(size > 5_000_000, `${file} is only ${size} bytes`)
+            }
+
+            // a file: or link: specifier resolves on this machine and nowhere else
+            const deps = { ...manifest.dependencies, ...manifest.peerDependencies }
+            const local = Object.entries(deps).filter(([, range]) => /^(file:|link:|portal:)/.test(range))
+            assert.equal(local.length, 0, `a consumer could not install: ${local.map(([n, r]) => `${n}@${r}`).join(", ")}`)
+
+            // Trusted publishing signs a provenance statement naming this repository, and the
+            // registry refuses a tarball whose manifest does not name the same one. Checked HERE
+            // because that refusal arrives at the very END: the 422 lands after the statement has
+            // already been signed and written to the public transparency log, so a manifest that
+            // cannot pass costs a sigstore entry for a version that was never published.
+            const expected = `https://github.com/${process.env.GITHUB_REPOSITORY}`
+            const declared = (manifest.repository?.url ?? manifest.repository ?? "").replace(/^git\+/, "").replace(/\.git$/, "")
+            assert.equal(declared, expected, `package.json repository is ${declared || "unset"}, and provenance will claim ${expected}`)
+            console.log(`artifact ok: ${manifest.name}@${manifest.version}`)
+          '
+        env:
+          LOCAL: ${{ steps.decide.outputs.local }}
+
+      # No credential is passed. npm exchanges the job's OIDC identity for a short-lived token against
+      # the trusted publisher configured on npmjs.com for Banou26/libav-wasm + publish.yml. BOTH
+      # HALVES ARE THE TRUST RELATIONSHIP.
+      #
+      # --ignore-scripts because `prepublishOnly` is `npm run build`, which would compile ffmpeg in
+      # docker all over again: ten minutes to produce a second artifact that nothing has tested, in
+      # place of the one that just passed the suite.
+      - name: Publish
+        if: steps.decide.outputs.changed == 'true'
+        run: npm publish --access public --ignore-scripts --loglevel verbose
+
+      - name: Tag the release
+        if: steps.decide.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.decide.outputs.local }}
+        run: |
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
