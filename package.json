@@ -3,7 +3,7 @@
   "version": "0.8.7",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Banou26/libav-wasm.git"
+    "url": "git+https://github.com/banou26/libav-wasm.git"
   },
   "main": "build/index.js",
   "files": [

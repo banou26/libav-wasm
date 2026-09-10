@@ -2,7 +2,7 @@
 #
 # THE FILENAME IS PART OF THE TRUST RELATIONSHIP AND MUST NOT CHANGE. npm trusted publishing binds
 # the package to a repository PLUS a workflow filename, and this file is the one registered on
-# npmjs.com for Banou26/libav-wasm. The `name:` below is display text and is safe to edit;
+# npmjs.com for banou26/libav-wasm. The `name:` below is display text and is safe to edit;
 # `publish.yml` is not. Renaming it, or the repository, stops every publish with an auth error that
 # reads like a revoked credential.
 #
@@ -220,7 +220,7 @@ jobs:
           LOCAL: ${{ steps.decide.outputs.local }}
 
       # No credential is passed. npm exchanges the job's OIDC identity for a short-lived token against
-      # the trusted publisher configured on npmjs.com for Banou26/libav-wasm + publish.yml. BOTH
+      # the trusted publisher configured on npmjs.com for banou26/libav-wasm + publish.yml. BOTH
       # HALVES ARE THE TRUST RELATIONSHIP.
       #
       # --ignore-scripts because `prepublishOnly` is `npm run build`, which would compile ffmpeg in
