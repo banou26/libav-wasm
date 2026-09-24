@@ -43,10 +43,11 @@
     "p-queue": "^7.3.0",
     "shx": "^0.3.4",
     "typescript": "^7.0.2",
-    "vite": "npm:@voidzero-dev/vite-plus-core@0.2.4",
-    "vite-plus": "0.2.4"
+    "vite": "npm:@voidzero-dev/vite-plus-core@0.3.3",
+    "vite-plus": "0.3.3"
   },
   "overrides": {
-    "vite": "npm:@voidzero-dev/vite-plus-core@0.2.4"
+    "vite": "npm:@voidzero-dev/vite-plus-core@0.3.3",
+    "vitest": "4.1.11"
   }
 }
