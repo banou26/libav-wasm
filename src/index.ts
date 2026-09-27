@@ -4,6 +4,7 @@ import type { SubtitleFragment } from './worker'
 
 import { expose, transfer } from 'osra'
 export * from './utils'
+export * from './hls'
 
 /**
  * The codecs a browser might take in an mp4, and the string to ask about each one by.
