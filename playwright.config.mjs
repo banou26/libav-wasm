@@ -23,6 +23,13 @@ const findChrome = () => {
 
 const executablePath = findChrome()
 
+// `--mute-audio` is output only, so it cannot change a result
+const chrome = {
+  ...devices['Desktop Chrome'],
+  ...(executablePath ? {} : { channel: 'chrome' }),
+  launchOptions: { executablePath, args: ['--mute-audio'] },
+}
+
 export default defineConfig({
   testDir: './tests',
   testMatch: '**/*.spec.mjs',
@@ -52,17 +59,11 @@ export default defineConfig({
   projects: [
     {
       name: 'chrome',
-      use: {
-        ...devices['Desktop Chrome'],
-        ...(executablePath ? { launchOptions: { executablePath } } : { channel: 'chrome' }),
-      },
+      use: chrome,
     },
     {
       name: 'no-jspi',
-      use: {
-        ...devices['Desktop Chrome'],
-        ...(executablePath ? { launchOptions: { executablePath } } : { channel: 'chrome' }),
-      },
+      use: chrome,
     },
   ],
 })
