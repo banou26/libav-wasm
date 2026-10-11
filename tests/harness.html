@@ -181,6 +181,39 @@ window.harness = {
     } finally { await remuxer.destroy() }
   },
 
+  /** one read left waiting on the source, a seek that cancels it, then reads until the file ends */
+  async cancelledReadThenEnd(name, { bufferSize, target }) {
+    const { length, read } = await sourceFor(name)
+    let holding = false
+    let onHeld
+    const held = []
+    const gated = (offset, size) => {
+      if (!holding) return read(offset, size)
+      return new Promise((resolve) => { held.push(() => resolve(read(offset, size))); onHeld?.() })
+    }
+    const remuxer = await makeRemuxer({ ...common(length, gated), bufferSize })
+    try {
+      await remuxer.init()
+      holding = true
+      // a read served from avio's own buffer never reaches the source, so read on until one does
+      let waiting
+      for (let i = 0; i < 100 && !waiting; i++) {
+        const heldNow = new Promise((resolve) => { onHeld = resolve })
+        const reading = remuxer.read().then(() => null, (error) => error.message)
+        if (await Promise.race([reading.then(() => false), heldNow.then(() => true)])) waiting = reading
+      }
+      holding = false
+      let finished = !!(await remuxer.seek(target)).finished
+      const cancelled = await waiting
+      let error = null
+      for (let i = 0; i < 1000 && !finished; i++) {
+        try { finished = !!(await remuxer.read()).finished } catch (failure) { error = failure.message; break }
+      }
+      held.forEach((release) => release())
+      return { cancelled, finished, error }
+    } finally { await remuxer.destroy() }
+  },
+
   async indexes(name) {
     const { length, read } = await sourceFor(name)
     const thumbnailer = await makeThumbnailer(common(length, read))

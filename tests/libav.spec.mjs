@@ -330,6 +330,18 @@ test.describe('seeking', () => {
   })
 
   /**
+   * A seek that cancels a read still waiting on the source left AVERROR_EXIT in the input's pb->error, which
+   * avio_seek does not clear and avio_read returns in place of EOF, so from the end of the file every read
+   * answered Cancelled and the trailer was never written (0.8.8, both builds, measured 2026-10-12).
+   */
+  test('a read cancelled by a seek does not turn the end of the file into a cancelled read', async ({ page }) => {
+    await open(page)
+    const result = await page.evaluate(() =>
+      window.harness.cancelledReadThenEnd('h264-aac.mkv', { bufferSize: 32_768, target: 50 }))
+    expect(result).toEqual({ cancelled: 'Cancelled', finished: true, error: null })
+  })
+
+  /**
    * A seek must not re-read the container header.
    *
    * `seek` used to close the input and open it again, which made lavf parse the header from scratch every

@@ -2116,6 +2116,9 @@ public:
       video_stream->time_base
     );
 
+    // A read this seek cancelled left AVERROR_EXIT in pb->error, which avio_seek does not clear and avio_read
+    // returns in place of EOF, so the end of the file read as cancelled and the trailer was never written.
+    input_format_context->pb->error = 0;
     int ret = av_seek_frame(input_format_context, video_stream_index, seek_target, AVSEEK_FLAG_BACKWARD);
     if (ret < 0) {
       printf("ERROR: av_seek_frame: %s\n", ffmpegErrStr(ret).c_str());
