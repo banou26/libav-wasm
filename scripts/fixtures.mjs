@@ -88,6 +88,14 @@ export const FIXTURES = [
     args: [...encode(), '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac'],
   },
   {
+    name: 'h264-aac-srt.mkv',
+    why: 'a SubRip track has no ASS header and plain text lines, so the player dropped every line of it',
+    seconds: 30,
+    subtitles: 'srt',
+    inputs: inputs(),
+    args: [...encode(), '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac'],
+  },
+  {
     name: 'h264-truehd.mkv',
     why: 'audio the mp4 muxer cannot write must drop to video only, not abort',
     seconds: 10,
@@ -276,7 +284,7 @@ const build = async (fixture) => {
     const subPath = join(FIXTURE_DIR, `${fixture.name}.srt`)
     await writeFile(subPath, SUBTITLE_TRACK)
     args.push('-i', subPath)
-    extra.push('-c:s', 'ass')
+    extra.push('-c:s', fixture.subtitles === 'srt' ? 'srt' : 'ass')
     maps.push('-map', '2:s')
   }
 

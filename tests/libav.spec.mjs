@@ -117,6 +117,20 @@ test.describe('remuxing', () => {
     expect(result.segments[0].bytes).toBeGreaterThan(0)
   })
 
+  // HOR-477: media-player reads ASS only, and a SubRip track has no header and plain text lines, so every
+  // one of a release's 40 SubRip tracks was dropped. The ASS track beside it is the control: both must read alike.
+  test('a SubRip track comes back as an ASS header and ASS event lines, like an ASS track', async ({ page }) => {
+    await open(page)
+    for (const name of ['h264-aac-srt.mkv', 'h264-aac-subs.mkv']) {
+      const result = await page.evaluate((fixture) => window.harness.subtitles(fixture), name)
+      expect(result.headers, name).toHaveLength(1)
+      expect(result.headers[0].content, name).toMatch(/\[Events\]\r?\nFormat: Layer, Start, End, Style/)
+      const lines = result.dialogues.map(({ content }) => content)
+      expect(lines, name).toContainEqual(expect.stringMatching(/^\d+,0,Default,,0,0,0,,first line$/))
+      expect(lines, name).toContainEqual(expect.stringMatching(/^\d+,0,Default,,0,0,0,,second line$/))
+    }
+  })
+
   /**
    * Audio is transcoded only because a browser will not take the codec, so the browser is asked.
    *

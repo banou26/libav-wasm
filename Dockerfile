@@ -70,7 +70,7 @@ RUN cd /tmp/ffmpeg-${FFMPEG_VERSION} && \
   --enable-postproc \
   --enable-demuxer=matroska,mov \
   --enable-muxer=mp4,mov \
-  --enable-decoder=h264,hevc,aac,mp3,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_s32be,pcm_f32le,pcm_f32be,eac3,ac3 \
+  --enable-decoder=h264,hevc,aac,mp3,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_s32be,pcm_f32le,pcm_f32be,eac3,ac3,subrip,webvtt,movtext,text \
   --enable-encoder=aac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le \
   --enable-parser=aac,h264,hevc,ac3 \
   --enable-filter=aresample,aformat,anull,atempo,volume \

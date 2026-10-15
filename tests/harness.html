@@ -83,6 +83,22 @@ window.harness = {
     } finally { await remuxer.destroy() }
   },
 
+  /** every subtitle header from init, and the dialogue lines of the first reads */
+  async subtitles(name) {
+    const { length, read } = await sourceFor(name)
+    const remuxer = await makeRemuxer(common(length, read))
+    try {
+      const init = await remuxer.init()
+      const dialogues = []
+      for (let i = 0; i < 20; i++) {
+        const chunk = await remuxer.read()
+        dialogues.push(...chunk.subtitles.map(({ content, start, end }) => ({ content, start, end })))
+        if (chunk.finished) break
+      }
+      return { headers: init.subtitles.map(({ content, streamIndex }) => ({ content, streamIndex })), dialogues }
+    } finally { await remuxer.destroy() }
+  },
+
   /** feeds the remuxed output to MediaSource, the only assertion that proves the bytes are really playable */
   async playable(name) {
     const { length, read } = await sourceFor(name)

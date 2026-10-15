@@ -8,6 +8,7 @@
 #include <numeric>
 #include <algorithm>
 #include <set>
+#include <map>
 
 extern "C" {
   #include <libavformat/avio.h>
@@ -1218,7 +1219,11 @@ public:
         AVDictionaryEntry* title = av_dict_get(in_stream->metadata, "title", NULL, 0);
         if (title) subtitle_fragment.title = title->value;
         std::string subtitle_data;
-        subtitle_data.assign((char*)in_codecpar->extradata, in_codecpar->extradata_size);
+        if (AVCodecContext* text = text_subtitle_decoder(i)) {
+          subtitle_data.assign((char*)text->subtitle_header, text->subtitle_header_size);
+        } else {
+          subtitle_data.assign((char*)in_codecpar->extradata, in_codecpar->extradata_size);
+        }
         subtitle_fragment.data = subtitle_data;
 
         subtitles.push_back(subtitle_fragment);
@@ -1367,6 +1372,40 @@ public:
     if (!audio_bsf) return true;
     if (av_bsf_send_packet(audio_bsf, packet) < 0) return false;
     return av_bsf_receive_packet(audio_bsf, packet) == 0;
+  }
+
+  // A text track (SubRip, WebVTT, mov_text, plain text) has no ASS header and carries plain or HTML-tagged
+  // lines, which the player cannot read. FFmpeg's own decoder turns it into an ASS header and ASS event
+  // lines, the same shape a Matroska ASS track has. Kept across seeks: it holds nothing of the input's.
+  std::map<int, AVCodecContext*> text_subtitle_decoders;
+
+  // nullptr for any other subtitle codec, which passes through as it is
+  AVCodecContext* text_subtitle_decoder(int stream_index) {
+    if (auto found = text_subtitle_decoders.find(stream_index); found != text_subtitle_decoders.end()) return found->second;
+    AVStream* stream = input_format_context->streams[stream_index];
+    AVCodecContext* avcc = nullptr;
+    switch (stream->codecpar->codec_id) {
+      case AV_CODEC_ID_SUBRIP:
+      case AV_CODEC_ID_TEXT:
+      case AV_CODEC_ID_WEBVTT:
+      case AV_CODEC_ID_MOV_TEXT: {
+        const AVCodec* codec = avcodec_find_decoder(stream->codecpar->codec_id);
+        if (!codec || !(avcc = avcodec_alloc_context3(codec))) break;
+        avcodec_parameters_to_context(avcc, stream->codecpar);
+        avcc->pkt_timebase = stream->time_base;
+        if (avcodec_open2(avcc, codec, nullptr) < 0) avcodec_free_context(&avcc);
+        break;
+      }
+      default:
+        break;
+    }
+    text_subtitle_decoders[stream_index] = avcc;
+    return avcc;
+  }
+
+  void destroy_text_subtitle_decoders() {
+    for (auto& [index, avcc] : text_subtitle_decoders) avcodec_free_context(&avcc);
+    text_subtitle_decoders.clear();
   }
 
   void destroy_streams() {
@@ -1876,11 +1915,23 @@ public:
         subtitle_fragment.isHeader = false;
         subtitle_fragment.start = packet->pts;
         subtitle_fragment.end   = subtitle_fragment.start + packet->duration;
-        std::string subtitle_data;
-        subtitle_data.assign((char*)packet->data, packet->size);
-        subtitle_fragment.data = subtitle_data;
-
-        subtitles.push_back(subtitle_fragment);
+        if (AVCodecContext* text = text_subtitle_decoder(packet->stream_index)) {
+          AVSubtitle decoded;
+          int got = 0;
+          if (avcodec_decode_subtitle2(text, &decoded, &got, packet) >= 0 && got) {
+            for (unsigned r = 0; r < decoded.num_rects; r++) {
+              if (!decoded.rects[r]->ass) continue;
+              subtitle_fragment.data = decoded.rects[r]->ass;
+              subtitles.push_back(subtitle_fragment);
+            }
+            avsubtitle_free(&decoded);
+          }
+        } else {
+          std::string subtitle_data;
+          subtitle_data.assign((char*)packet->data, packet->size);
+          subtitle_fragment.data = subtitle_data;
+          subtitles.push_back(subtitle_fragment);
+        }
         av_packet_free(&packet);
         continue;
       }
@@ -2169,6 +2220,7 @@ public:
 
   void destroy() {
     destroy_streams();
+    destroy_text_subtitle_decoders();
     destroy_input();
     destroy_output();
     destroy_audio();
