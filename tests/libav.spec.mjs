@@ -522,6 +522,37 @@ test.describe('byte offsets', () => {
   })
 })
 
+/*
+ * fkn.app serves every app's same-origin responses with this policy (fkn-client `sandbox/src/shared/tenant.ts`),
+ * the worker script included, and a same-origin worker takes its policy from its own response. embind's
+ * default invokers are compiled with `new Function`, which the policy refuses, so up to 0.8.10 the worker died
+ * with an EvalError before `init()` and ripple could not play anything on fkn.app.
+ */
+const TENANT_CSP = "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'none'; base-uri 'self'"
+
+test.describe('under a content security policy', () => {
+  test('the worker remuxes and thumbnails without unsafe-eval', async ({ page }) => {
+    await page.route('**/*', async (route) => {
+      const response = await route.fetch()
+      await route.fulfill({ response, headers: { ...response.headers(), 'content-security-policy': TENANT_CSP } })
+    })
+    await open(page)
+
+    const probe = await page.evaluate(() => new Promise((done) => {
+      const worker = new Worker('/eval-probe-worker.js')
+      worker.onmessage = (event) => { worker.terminate(); done(event.data) }
+    }))
+    expect(probe, 'the policy did not reach a same-origin worker, so this test proves nothing').toBe('EvalError')
+
+    const remuxed = await page.evaluate(() => window.harness.remux('h264-aac.mkv'))
+    expect(remuxed.videoMimeType).toMatch(/^avc1\./)
+    expect(remuxed.segments[0].bytes).toBeGreaterThan(0)
+
+    const thumbnails = await page.evaluate(() => window.harness.thumbnails('h264-aac.mkv', [20]))
+    expectFrameAt(thumbnails.shots[0], 20)
+  })
+})
+
 // Whatever real files the owner dropped in fixtures/local. Empty in CI, and never committed, so wild
 // coverage costs nothing in the repo. These assert only what must hold for ANY file.
 test.describe('local files', () => {

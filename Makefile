@@ -54,7 +54,11 @@ DEBUG_FLAGS = -g -gsource-map --source-map-base http://localhost:1234/dist/ -s A
 # as 36 of 36 tests failing. Native wasm EH emits no invoke_* at all, which is why it works.
 all: dist/libav.js dist/libav-jspi.js
 
+# DYNAMIC_EXECUTION=0: embind otherwise compiles every invoker and emval method caller with `new Function`,
+# which a content security policy without 'unsafe-eval' refuses, and fkn.app serves every app's worker
+# with exactly that policy. 'wasm-unsafe-eval' is all the wasm itself needs.
 COMMON = --bind \
+	-s DYNAMIC_EXECUTION=0 \
 	-Oz \
 	$(if $(DEBUG),$(DEBUG_FLAGS)) \
 	-L/opt/ffmpeg/lib \
