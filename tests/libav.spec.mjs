@@ -525,8 +525,8 @@ test.describe('byte offsets', () => {
 /*
  * fkn.app serves every app's same-origin responses with this policy (fkn-client `sandbox/src/shared/tenant.ts`),
  * the worker script included, and a same-origin worker takes its policy from its own response. embind's
- * default invokers are compiled with `new Function`, which the policy refuses, so up to 0.8.10 the worker died
- * with an EvalError before `init()` and ripple could not play anything on fkn.app.
+ * default invokers are compiled with `new Function`, which the policy refuses; the Makefile's
+ * `DYNAMIC_EXECUTION=0` is what keeps them out.
  */
 const TENANT_CSP = "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'none'; base-uri 'self'"
 
