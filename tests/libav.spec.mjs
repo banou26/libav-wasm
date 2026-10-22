@@ -131,6 +131,19 @@ test.describe('remuxing', () => {
     }
   })
 
+  // matroska counts milliseconds, the player's unit, so it hides an unconverted time; ffmpeg's mov_text counts 1/1000000
+  test('subtitle cues are timed in milliseconds, whatever time base the track counts in', async ({ page }) => {
+    await open(page)
+    for (const name of ['h264-aac-movtext.mp4', 'h264-aac-srt.mkv', 'h264-aac-subs.mkv']) {
+      const { dialogues } = await page.evaluate((fixture) => window.harness.subtitles(fixture), name)
+      expect(dialogues.map(({ content, start, end }) => [content.split(',').at(-1), start, end]), name).toEqual([
+        ['first line', 1000, 5000],
+        ['second line', 6000, 10000],
+        ['third line', 11000, 15000],
+      ])
+    }
+  })
+
   /**
    * Audio is transcoded only because a browser will not take the codec, so the browser is asked.
    *

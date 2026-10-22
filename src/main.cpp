@@ -1913,8 +1913,8 @@ public:
         SubtitleFragment subtitle_fragment;
         subtitle_fragment.streamIndex = packet->stream_index;
         subtitle_fragment.isHeader = false;
-        subtitle_fragment.start = packet->pts;
-        subtitle_fragment.end   = subtitle_fragment.start + packet->duration;
+        subtitle_fragment.start = av_rescale_q(packet->pts, in_stream->time_base, { 1, 1000 });
+        subtitle_fragment.end   = subtitle_fragment.start + av_rescale_q(packet->duration, in_stream->time_base, { 1, 1000 });
         if (AVCodecContext* text = text_subtitle_decoder(packet->stream_index)) {
           AVSubtitle decoded;
           int got = 0;

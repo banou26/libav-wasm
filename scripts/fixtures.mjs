@@ -96,6 +96,14 @@ export const FIXTURES = [
     args: [...encode(), '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac'],
   },
   {
+    name: 'h264-aac-movtext.mp4',
+    why: 'an mp4 subtitle track counts in its own timescale, 1/1000000 from ffmpeg, where matroska counts milliseconds',
+    seconds: 20,
+    subtitles: 'mov_text',
+    inputs: inputs(),
+    args: [...encode(), '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac'],
+  },
+  {
     name: 'h264-truehd.mkv',
     why: 'audio the mp4 muxer cannot write must drop to video only, not abort',
     seconds: 10,
@@ -284,7 +292,7 @@ const build = async (fixture) => {
     const subPath = join(FIXTURE_DIR, `${fixture.name}.srt`)
     await writeFile(subPath, SUBTITLE_TRACK)
     args.push('-i', subPath)
-    extra.push('-c:s', fixture.subtitles === 'srt' ? 'srt' : 'ass')
+    extra.push('-c:s', fixture.subtitles === true ? 'ass' : fixture.subtitles)
     maps.push('-map', '2:s')
   }
 

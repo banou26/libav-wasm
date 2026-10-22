@@ -29,7 +29,9 @@ export type SubtitleFragment =
   | {
     type: 'dialogue'
     streamIndex: any
+    /** milliseconds from the start of the content, whatever time base the track counts in */
     start: number
+    /** milliseconds, like `start` */
     end: number
     dialogueIndex: number
     layer: number
