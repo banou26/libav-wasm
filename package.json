@@ -38,7 +38,7 @@
     "@types/emscripten": "^1.40.0",
     "concurrently": "^7.6.0",
     "copyfiles": "^2.4.1",
-    "nodemon": "^2.0.22",
+    "nodemon": "^3.1.14",
     "osra": "^0.6.12",
     "p-queue": "^7.3.0",
     "shx": "^0.3.4",
