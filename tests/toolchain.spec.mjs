@@ -29,6 +29,15 @@ test.describe('the vite-plus toolchain is pinned as one release', () => {
     expect(vites).toEqual([`@voidzero-dev/vite-plus-core@${vitePlus.version}`])
   })
 
+  test('every vite-plus package, nested copies included, is at the installed vite-plus release', () => {
+    const copies = installed(/(^|\/)node_modules\/(vite-plus|@voidzero-dev\/vite-plus-[^/]+)$/)
+    expect(copies.length, 'the scan found no vite-plus package, so it proves nothing').toBeGreaterThan(1)
+    const off = copies
+      .filter(([, entry]) => entry.version !== vitePlus.version)
+      .map(([path, entry]) => `${path}@${entry.version}`)
+    expect(off).toEqual([])
+  })
+
   test('the vitest pin is the vitest vite-plus itself depends on', () => {
     expect(vitePlus.dependencies?.vitest).toBeDefined()
     expect(manifest.overrides.vitest).toBe(vitePlus.dependencies?.vitest)
