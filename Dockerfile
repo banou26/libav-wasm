@@ -92,9 +92,5 @@ RUN cd /tmp/ffmpeg-${FFMPEG_VERSION} && \
   emmake make -j4 && \
   emmake make install
 
-COPY ./src/main.cpp /build/src/main.cpp
-COPY ./Makefile /build/Makefile
-
+# the image is the toolchain only: `npm run make-docker` mounts the repo here and runs make
 WORKDIR /build
-
-RUN make

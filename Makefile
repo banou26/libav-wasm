@@ -54,6 +54,9 @@ DEBUG_FLAGS = -g -gsource-map --source-map-base http://localhost:1234/dist/ -s A
 # as 36 of 36 tests failing. Native wasm EH emits no invoke_* at all, which is why it works.
 all: dist/libav.js dist/libav-jspi.js
 
+# a rebuilt image (a new patch in patches/) has to relink both builds, though src/main.cpp did not change
+FFMPEG_LIBS = $(wildcard /opt/ffmpeg/lib/*.a)
+
 # DYNAMIC_EXECUTION=0: embind otherwise compiles every invoker and emval method caller with `new Function`,
 # which a content security policy without 'unsafe-eval' refuses, and fkn.app serves every app's worker
 # with exactly that policy. 'wasm-unsafe-eval' is all the wasm itself needs.
@@ -73,7 +76,7 @@ COMMON = --bind \
 	-s MODULARIZE=1 \
 	-lavcodec -lavformat -lavfilter -lavdevice -lswresample -lswscale -lavutil -lm -lx264
 
-dist/libav.js: src/main.cpp Makefile
+dist/libav.js: src/main.cpp Makefile $(FFMPEG_LIBS)
 	mkdir -p dist && \
 	emcc $(COMMON) \
 	-s ASYNCIFY \
@@ -82,7 +85,7 @@ dist/libav.js: src/main.cpp Makefile
 	-o dist/libav.js \
 	src/main.cpp
 
-dist/libav-jspi.js: src/main.cpp Makefile
+dist/libav-jspi.js: src/main.cpp Makefile $(FFMPEG_LIBS)
 	mkdir -p dist && \
 	emcc $(COMMON) \
 	-s JSPI \

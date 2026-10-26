@@ -16,7 +16,7 @@
     "dev-wasm-cmd": "nodemon -e cpp --exec \"npm run make-docker-debug\"",
     "dev-wasm": "concurrently \"nodemon -e cpp --exec \\\"npm run make-docker-debug\\\"\"",
     "build-worker": "vp build --config vite-worker.config.ts",
-    "make-docker": "docker compose run --rm libav-wasm make",
+    "make-docker": "docker compose run --build --rm libav-wasm make",
     "docker-clean": "docker compose up --remove-orphans",
     "dev-web": "vp dev --port 1234",
     "vite-build": "vp build",
@@ -27,7 +27,7 @@
     "types": "tsc",
     "copy-wasm": "copyfiles -u 1 dist/libav.wasm dist/libav-jspi.wasm build && shx mv ./build/worker/index.d.ts ./build/worker.d.ts && shx rm -rf ./build/worker",
     "preview": "vp preview",
-    "make-docker-debug": "docker compose run --rm libav-wasm make DEBUG=1",
+    "make-docker-debug": "docker compose run --build --rm libav-wasm make DEBUG=1",
     "fixtures": "node scripts/fixtures.mjs",
     "test": "playwright test",
     "test:large": "LIBAV_LARGE_FIXTURE=1 playwright test"
