@@ -115,8 +115,8 @@ typedef struct Index {
 
 typedef struct Chapter {
   int index;
-  float start;
-  float end;
+  double start;
+  double end;
   std::string title;
 } Chapter;
 
@@ -1796,12 +1796,11 @@ public:
 
     for (int i = 0; i < input_format_context->nb_chapters; i++) {
       AVChapter *av_chapter = input_format_context->chapters[i];
-      int64_t start_time = av_chapter->start * av_chapter->time_base.num / av_chapter->time_base.den;
-      int64_t end_time = av_chapter->end * av_chapter->time_base.num / av_chapter->time_base.den;
+      // dividing last keeps 194980000000 / 1e9 at 194.98, where av_q2d's 1e-9 gives 194.98000000000002
       Chapter chapter;
       chapter.index = i;
-      chapter.start = start_time;
-      chapter.end = end_time;
+      chapter.start = (double)av_chapter->start * av_chapter->time_base.num / av_chapter->time_base.den;
+      chapter.end = (double)av_chapter->end * av_chapter->time_base.num / av_chapter->time_base.den;
       AVDictionaryEntry *capter_entry = NULL;
       capter_entry = av_dict_get(av_chapter->metadata, "title", NULL, 0);
       if (capter_entry) {

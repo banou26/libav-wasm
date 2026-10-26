@@ -188,6 +188,14 @@ test.describe('chapters', () => {
     const chapters = await page.evaluate(() => window.harness.chapters('two-editions.mkv'))
     expect(chapters.map(({ title }) => title)).toEqual(['Prologue', 'Opening', 'Episode', 'Credits Start', 'Credits End'])
   })
+
+  // chapter times were cut to whole seconds, so a group's "Ending" at 1206.49 s came out at 1206
+  test('chapter times keep their fraction of a second', async ({ page }) => {
+    await open(page)
+    const chapters = await page.evaluate(() => window.harness.chapters('two-editions.mkv'))
+    expect(chapters.map(({ start }) => start)).toEqual([0, 2, 3.25, 6.5, 8])
+    expect(chapters.slice(0, -1).map(({ end }) => end)).toEqual([2, 3.25, 6.5, 8])
+  })
 })
 
 // One case per REASON a container used to fail, not one per extension. Every one of these produced either
