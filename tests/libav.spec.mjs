@@ -181,7 +181,7 @@ test.describe('remuxing', () => {
 })
 
 test.describe('chapters', () => {
-  // HOR-1056: FFmpeg reads every edition as one list and keeps each chapter that starts after the last one
+  // FFmpeg reads every edition as one list and keeps each chapter that starts after the last one
   // kept, so the second edition's Epilogue reached the player after the first edition's Credits End
   test('a file with two chapter editions hands over only the first', async ({ page }) => {
     await open(page)
