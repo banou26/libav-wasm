@@ -180,6 +180,16 @@ test.describe('remuxing', () => {
   })
 })
 
+test.describe('chapters', () => {
+  // HOR-1056: FFmpeg reads every edition as one list and keeps each chapter that starts after the last one
+  // kept, so the second edition's Epilogue reached the player after the first edition's Credits End
+  test('a file with two chapter editions hands over only the first', async ({ page }) => {
+    await open(page)
+    const chapters = await page.evaluate(() => window.harness.chapters('two-editions.mkv'))
+    expect(chapters.map(({ title }) => title)).toEqual(['Prologue', 'Opening', 'Episode', 'Credits Start', 'Credits End'])
+  })
+})
+
 // One case per REASON a container used to fail, not one per extension. Every one of these produced either
 // a module-killing throw or an mp4 with a codec nothing could name, which MediaSource rejects outright.
 test.describe('containers', () => {

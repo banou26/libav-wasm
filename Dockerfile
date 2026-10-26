@@ -38,6 +38,10 @@ RUN cd /tmp/ && \
   wget http://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.gz && \
   tar zxf ffmpeg-${FFMPEG_VERSION}.tar.gz && rm ffmpeg-${FFMPEG_VERSION}.tar.gz
 
+COPY ./patches/ /tmp/patches/
+RUN cd /tmp/ffmpeg-${FFMPEG_VERSION} && \
+  for patch in /tmp/patches/*.patch; do patch -p1 < "$patch" || exit 1; done
+
 ARG CFLAGS="-s USE_PTHREADS=1 -O3 -I${PREFIX}/include"
 ARG LDFLAGS="$CFLAGS -L${PREFIX}/lib -s INITIAL_MEMORY=1GB"
 

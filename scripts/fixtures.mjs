@@ -9,7 +9,7 @@
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile, readdir, stat } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
@@ -38,6 +38,16 @@ const inputs = (size = `${WIDTH}x${HEIGHT}`, fps = FPS) => [
 const encode = (gop = GOP) => [
   '-filter:v', colourByTime,
   '-g', String(gop), '-keyint_min', String(gop), '-sc_threshold', '0',
+]
+
+/**
+ * Two editions, as in Judas's batch files: Crunchyroll's events first, then the group's own. Every title is
+ * unique to its edition, and the second edition's last chapter starts after the first edition's last one,
+ * which is the only kind of chapter FFmpeg's join lets through.
+ */
+const TWO_EDITIONS = [
+  [['Prologue', '00:00:00.000'], ['Opening', '00:00:02.000'], ['Episode', '00:00:03.250'], ['Credits Start', '00:00:06.500'], ['Credits End', '00:00:08.000']],
+  [['Cold Open', '00:00:00.000'], ['OP', '00:00:02.500'], ['Part A', '00:00:03.500'], ['Ending', '00:00:05.490'], ['Epilogue', '00:00:08.500']],
 ]
 
 /**
@@ -235,6 +245,14 @@ export const FIXTURES = [
     ],
   },
   {
+    name: 'two-editions.mkv',
+    why: "FFmpeg joins every chapter edition, so a second edition's late chapters reached the player",
+    seconds: 10,
+    chapters: TWO_EDITIONS,
+    inputs: inputs(),
+    args: [...encode(), '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac'],
+  },
+  {
     name: 'theora-vorbis.ogv',
     why: 'a video codec no browser can play has to say so, not abort or produce an mp4 nothing accepts',
     seconds: 10,
@@ -272,9 +290,19 @@ second line
 third line
 `
 
+/** FFmpeg's matroska muxer writes one edition, so mkvmerge writes the chapters */
+const chaptersXml = (editions) => `<?xml version="1.0" encoding="UTF-8"?>
+<Chapters>
+${editions.map((chapters, edition) => ` <EditionEntry>
+  <EditionUID>${edition + 1}</EditionUID>
+${chapters.map(([title, start], index) => `  <ChapterAtom><ChapterUID>${(edition + 1) * 10 + index + 1}</ChapterUID><ChapterTimeStart>${start}</ChapterTimeStart><ChapterDisplay><ChapterString>${title}</ChapterString></ChapterDisplay></ChapterAtom>`).join('\n')}
+ </EditionEntry>`).join('\n')}
+</Chapters>
+`
+
 /** the spec decides the bytes, so its hash decides whether a cached fixture is still valid */
 const specHash = (fixture) =>
-  createHash('sha256').update(JSON.stringify([fixture.inputs, fixture.args, fixture.seconds, fixture.subtitles, fixture.cover, fixture.maps, SECOND_STEP])).digest('hex').slice(0, 16)
+  createHash('sha256').update(JSON.stringify([fixture.inputs, fixture.args, fixture.seconds, fixture.subtitles, fixture.cover, fixture.maps, SECOND_STEP, ...(fixture.chapters ? [fixture.chapters] : [])])).digest('hex').slice(0, 16)
 
 const build = async (fixture) => {
   const target = join(FIXTURE_DIR, fixture.name)
@@ -306,9 +334,15 @@ const build = async (fixture) => {
 
   args.push(...fixture.args, ...extra, '-t', String(fixture.seconds), ...maps)
   if (fixture.strict) args.push('-strict', '-2')
-  args.push(target)
+  const plainPath = `${target}.plain.mkv`
+  args.push(fixture.chapters ? plainPath : target)
 
   await run('ffmpeg', args, { maxBuffer: 64 * 1024 * 1024 })
+  if (fixture.chapters) {
+    const chaptersPath = `${target}.chapters.xml`
+    await writeFile(chaptersPath, chaptersXml(fixture.chapters))
+    await run('mkvmerge', ['--quiet', '--output', target, '--chapters', chaptersPath, plainPath])
+  }
   await writeFile(stampPath, hash)
   return { ...fixture, path: target, cached: false }
 }

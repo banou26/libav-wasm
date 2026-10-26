@@ -94,6 +94,14 @@ window.harness = {
     } finally { await remuxer.destroy() }
   },
 
+  async chapters(name) {
+    const { length, read } = await sourceFor(name)
+    const remuxer = await makeRemuxer(common(length, read))
+    try {
+      return (await remuxer.init()).chapters
+    } finally { await remuxer.destroy() }
+  },
+
   /** feeds the remuxed output to MediaSource, the only assertion that proves the bytes are really playable */
   async playable(name) {
     const { length, read } = await sourceFor(name)

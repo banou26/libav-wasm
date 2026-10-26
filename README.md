@@ -80,6 +80,9 @@ cannot follow, and a thumbnailer has no muxer to damage.
 the library and the worker, and emits types. Only the last step re-runs when you touch C++, so the loop is
 about 25 seconds.
 
+ffmpeg is built with every patch in [patches/](./patches) applied, each saying at its head what it changes and
+why. Adding or editing one rebuilds ffmpeg on the next `npm run build`, which took 99 seconds here.
+
 ### Two builds, one source
 
 `make` emits **both** `libav.wasm` and `libav-jspi.wasm`, and the worker picks between them at runtime on
@@ -97,10 +100,10 @@ byte-identical output, not merely "it ran".
 
 ## Tests
 
-`npm test` runs a browser suite against fixtures it synthesizes with ffmpeg on first run. Nothing is
-committed and nothing is anyone's content, so there is no copyright question and no multi-megabyte blob in
-git history: what matters for a remuxer is a file's structure, and every fixture exists because a real bug
-needed exactly that structure to show up.
+`npm test` runs a browser suite against fixtures it synthesizes with ffmpeg (and mkvmerge, for a file with
+two chapter editions) on first run. Nothing is committed and nothing is anyone's content, so there is no
+copyright question and no multi-megabyte blob in git history: what matters for a remuxer is a file's
+structure, and every fixture exists because a real bug needed exactly that structure to show up.
 
 Each fixture encodes its own timestamp in the frame's colour, so a decoded thumbnail can be checked back to
 the second it came from. Without that the only available assertion is "some bytes came back", which is how
