@@ -1,6 +1,6 @@
 {
   "name": "libav-wasm",
-  "version": "0.8.12",
+  "version": "0.8.13",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/banou26/libav-wasm.git"
