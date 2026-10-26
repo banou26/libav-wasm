@@ -189,6 +189,13 @@ test.describe('chapters', () => {
     expect(chapters.map(({ title }) => title)).toEqual(['Prologue', 'Opening', 'Episode', 'Credits Start', 'Credits End'])
   })
 
+  // RFC 9559 20.1.2: the first edition flagged default is the one to play, and the one mpv shows
+  test('an edition flagged default is handed over in place of the first', async ({ page }) => {
+    await open(page)
+    const chapters = await page.evaluate(() => window.harness.chapters('two-editions-default-second.mkv'))
+    expect(chapters.map(({ title }) => title)).toEqual(['Cold Open', 'OP', 'Part A', 'Ending', 'Epilogue'])
+  })
+
   // chapter times were cut to whole seconds, so a group's "Ending" at 1206.49 s came out at 1206
   test('chapter times keep their fraction of a second', async ({ page }) => {
     await open(page)

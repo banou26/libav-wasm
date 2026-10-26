@@ -1,21 +1,23 @@
 FFmpeg reads every chapter edition of a Matroska file as one list and keeps each chapter that starts after
 the last one kept, so a later edition's closing chapters were handed over after the first edition's. Each
-edition is a whole alternative list, so only the first one is read. Still the case in FFmpeg 9.0.2.
+edition is a whole alternative list, so only the default edition is read, as RFC 9559 20.1.2 defines it
+and mpv picks it: the first flagged default, else the first. Still the case in FFmpeg 9.0.2.
 
 --- a/libavformat/matroskadec.c
 +++ b/libavformat/matroskadec.c
-@@ -317,6 +317,10 @@
+@@ -317,6 +317,11 @@
      AVChapter *chapter;
  } MatroskaChapter;
  
 +typedef struct MatroskaEdition {
++    uint64_t flag_default;
 +    EbmlList chapters;
 +} MatroskaEdition;
 +
  typedef struct MatroskaIndexPos {
      uint64_t track;
      uint64_t pos;
-@@ -402,7 +406,7 @@
+@@ -402,7 +407,7 @@
      EbmlBin  date_utc;
      EbmlList tracks;
      EbmlList attachments;
@@ -24,7 +26,7 @@ edition is a whole alternative list, so only the first one is read. Still the ca
      EbmlList index;
      EbmlList tags;
      EbmlList seekhead;
-@@ -682,7 +686,7 @@
+@@ -682,16 +687,16 @@
  };
  
  static EbmlSyntax matroska_chapter[] = {
@@ -32,8 +34,10 @@ edition is a whole alternative list, so only the first one is read. Still the ca
 +    { MATROSKA_ID_CHAPTERATOM,        EBML_NEST, 0, sizeof(MatroskaChapter), offsetof(MatroskaEdition, chapters), { .n = matroska_chapter_entry } },
      { MATROSKA_ID_EDITIONUID,         EBML_NONE },
      { MATROSKA_ID_EDITIONFLAGHIDDEN,  EBML_NONE },
-     { MATROSKA_ID_EDITIONFLAGDEFAULT, EBML_NONE },
-@@ -691,7 +695,7 @@
+-    { MATROSKA_ID_EDITIONFLAGDEFAULT, EBML_NONE },
++    { MATROSKA_ID_EDITIONFLAGDEFAULT, EBML_UINT, 0, 0, offsetof(MatroskaEdition, flag_default), { .u = 0 } },
+     { MATROSKA_ID_EDITIONFLAGORDERED, EBML_NONE },
+     CHILD_OF(matroska_chapters)
  };
  
  static EbmlSyntax matroska_chapters[] = {
@@ -42,23 +46,27 @@ edition is a whole alternative list, so only the first one is read. Still the ca
      CHILD_OF(matroska_segment)
  };
  
-@@ -1846,6 +1850,15 @@
+@@ -1846,6 +1851,19 @@
      ff_metadata_conv(metadata, NULL, ff_mkv_metadata_conv);
  }
  
-+/* Only the first edition is read. Each edition is a whole alternative list, so joining them put a later
-+ * edition's chapters among the first's. */
++/* Only the default edition is read, as RFC 9559 20.1.2 defines it: the first flagged default, else the
++ * first. Each edition is a whole alternative list, so joining them put a later edition's chapters among
++ * the first's. */
 +static const EbmlList *matroska_chapters_list(const MatroskaDemuxContext *matroska)
 +{
 +    static const EbmlList none;
 +    const MatroskaEdition *editions = matroska->editions.elem;
++    for (int i = 0; i < matroska->editions.nb_elem; i++)
++        if (editions[i].flag_default)
++            return &editions[i].chapters;
 +    return matroska->editions.nb_elem ? &editions[0].chapters : &none;
 +}
 +
  static void matroska_convert_tags(AVFormatContext *s)
  {
      MatroskaDemuxContext *matroska = s->priv_data;
-@@ -1871,9 +1884,10 @@
+@@ -1871,9 +1889,10 @@
                         i, tags[i].target.attachuid);
              }
          } else if (tags[i].target.chapteruid) {
@@ -71,7 +79,7 @@ edition is a whole alternative list, so only the first one is read. Still the ca
                  if (chapter[j].uid == tags[i].target.chapteruid &&
                      chapter[j].chapter) {
                      matroska_convert_tag(s, &tags[i].tag,
-@@ -3299,7 +3313,7 @@
+@@ -3299,7 +3318,7 @@
      FFFormatContext *const si = ffformatcontext(s);
      MatroskaDemuxContext *matroska = s->priv_data;
      EbmlList *attachments_list = &matroska->attachments;
@@ -80,7 +88,7 @@ edition is a whole alternative list, so only the first one is read. Still the ca
      MatroskaAttachment *attachments;
      MatroskaChapter *chapters;
      uint64_t max_start = 0;
-@@ -3427,6 +3441,7 @@
+@@ -3427,6 +3446,7 @@
          }
      }
  

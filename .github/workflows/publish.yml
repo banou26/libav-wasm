@@ -52,7 +52,7 @@ jobs:
 
       # fixtures/ is gitignored, so a fresh checkout has no test media at all: scripts/fixtures.mjs
       # synthesizes every file with ffmpeg rather than carrying megabytes in git history, and mkvmerge
-      # writes the one with two chapter editions.
+      # writes the ones with two chapter editions.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg mkvtoolnix
 
       # playwright.config.mjs resolves a real Chrome from PATH and falls back to playwright's own

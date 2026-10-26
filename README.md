@@ -100,7 +100,7 @@ byte-identical output, not merely "it ran".
 
 ## Tests
 
-`npm test` runs a browser suite against fixtures it synthesizes with ffmpeg (and mkvmerge, for a file with
+`npm test` runs a browser suite against fixtures it synthesizes with ffmpeg (and mkvmerge, for the files with
 two chapter editions) on first run. Nothing is committed and nothing is anyone's content, so there is no
 copyright question and no multi-megabyte blob in git history: what matters for a remuxer is a file's
 structure, and every fixture exists because a real bug needed exactly that structure to show up.

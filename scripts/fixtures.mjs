@@ -253,6 +253,15 @@ export const FIXTURES = [
     args: [...encode(), '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac'],
   },
   {
+    name: 'two-editions-default-second.mkv',
+    why: 'the edition flagged default is the one a player shows, wherever it sits',
+    seconds: 10,
+    chapters: TWO_EDITIONS,
+    defaultEdition: 1,
+    inputs: inputs(),
+    args: [...encode(), '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac'],
+  },
+  {
     name: 'theora-vorbis.ogv',
     why: 'a video codec no browser can play has to say so, not abort or produce an mp4 nothing accepts',
     seconds: 10,
@@ -291,10 +300,10 @@ third line
 `
 
 /** FFmpeg's matroska muxer writes one edition, so mkvmerge writes the chapters */
-const chaptersXml = (editions) => `<?xml version="1.0" encoding="UTF-8"?>
+const chaptersXml = (editions, defaultEdition) => `<?xml version="1.0" encoding="UTF-8"?>
 <Chapters>
 ${editions.map((chapters, edition) => ` <EditionEntry>
-  <EditionUID>${edition + 1}</EditionUID>
+  <EditionUID>${edition + 1}</EditionUID>${edition === defaultEdition ? '<EditionFlagDefault>1</EditionFlagDefault>' : ''}
 ${chapters.map(([title, start], index) => `  <ChapterAtom><ChapterUID>${(edition + 1) * 10 + index + 1}</ChapterUID><ChapterTimeStart>${start}</ChapterTimeStart><ChapterDisplay><ChapterString>${title}</ChapterString></ChapterDisplay></ChapterAtom>`).join('\n')}
  </EditionEntry>`).join('\n')}
 </Chapters>
@@ -302,7 +311,7 @@ ${chapters.map(([title, start], index) => `  <ChapterAtom><ChapterUID>${(edition
 
 /** the spec decides the bytes, so its hash decides whether a cached fixture is still valid */
 const specHash = (fixture) =>
-  createHash('sha256').update(JSON.stringify([fixture.inputs, fixture.args, fixture.seconds, fixture.subtitles, fixture.cover, fixture.maps, SECOND_STEP, ...(fixture.chapters ? [fixture.chapters] : [])])).digest('hex').slice(0, 16)
+  createHash('sha256').update(JSON.stringify([fixture.inputs, fixture.args, fixture.seconds, fixture.subtitles, fixture.cover, fixture.maps, SECOND_STEP, ...(fixture.chapters ? [fixture.chapters, fixture.defaultEdition] : [])])).digest('hex').slice(0, 16)
 
 const build = async (fixture) => {
   const target = join(FIXTURE_DIR, fixture.name)
@@ -340,7 +349,7 @@ const build = async (fixture) => {
   await run('ffmpeg', args, { maxBuffer: 64 * 1024 * 1024 })
   if (fixture.chapters) {
     const chaptersPath = `${target}.chapters.xml`
-    await writeFile(chaptersPath, chaptersXml(fixture.chapters))
+    await writeFile(chaptersPath, chaptersXml(fixture.chapters, fixture.defaultEdition))
     await run('mkvmerge', ['--quiet', '--output', target, '--chapters', chaptersPath, plainPath])
   }
   await writeFile(stampPath, hash)
