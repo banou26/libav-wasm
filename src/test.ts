@@ -104,6 +104,7 @@ fetch(VIDEO_URL, { headers: { Range: `bytes=0-1` } })
             const sourceBuffer = mediaSource.addSourceBuffer(`video/mp4; codecs="${[header.info.output.videoMimeType, header.info.output.audioMimeType].filter(Boolean).join(',')}"`)
             mediaSource.duration = header.info.input.duration
             sourceBuffer.mode = 'segments'
+            sourceBuffer.timestampOffset = header.timestampOffset
             resolve(sourceBuffer)
           },
           { once: true }
@@ -232,7 +233,6 @@ fetch(VIDEO_URL, { headers: { Range: `bytes=0-1` } })
             .finally(() => {
               currentSeeks = currentSeeks.filter(seekObj => seekObj !== seekObject)
             })
-        sourceBuffer.timestampOffset = res.pts
         await appendBuffer(res.data)
       } catch (err: any) {
         if (err.message === 'Cancelled') return
