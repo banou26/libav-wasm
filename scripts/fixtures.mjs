@@ -62,6 +62,14 @@ export const FIXTURES = [
     args: [...encode(), '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac'],
   },
   {
+    name: 'h264-bframes-aac.mkv',
+    why: "B-frames put a stream's first decode time 2 frames before its first picture, which moved every track",
+    seconds: 20,
+    // keyframes at 0 and 10.01 s, and veryfast is the fastest preset that writes B-frames
+    inputs: inputs(`${WIDTH}x${HEIGHT}`, '24000/1001'),
+    args: [...encode(240), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac'],
+  },
+  {
     name: 'h264-ac3.mkv',
     why: 'ac3 used to abort the whole module inside avformat_write_header',
     seconds: 30,

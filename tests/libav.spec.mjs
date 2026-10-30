@@ -1,9 +1,13 @@
 // Every test here exists because a real bug got through without it. The fixtures are synthesized, so the
 // suite needs no committed media and no one else's content; see scripts/fixtures.mjs.
 
+import { execFile } from 'node:child_process'
+import { join } from 'node:path'
+import { promisify } from 'node:util'
+
 import { expect, test } from '@playwright/test'
 
-import { ensureFixtures, localFixtures, secondFromRed } from '../scripts/fixtures.mjs'
+import { ensureFixtures, FIXTURE_DIR, localFixtures, secondFromRed } from '../scripts/fixtures.mjs'
 
 const LARGE = process.env.LIBAV_LARGE_FIXTURE === '1'
 
@@ -429,6 +433,56 @@ test.describe('seeking', () => {
       expect(Math.abs(step.pts - step.target), `seek(${step.target}) landed at ${step.pts}`).toBeLessThanOrEqual(3)
     }
   })
+})
+
+/** each packet's time from the start of the content, per kind in the file's order, as ffprobe reads it */
+const sourceTimes = async (name) => {
+  const { stdout } = await promisify(execFile)('ffprobe', [
+    '-v', 'error', '-show_entries', 'stream=codec_type,start_time:packet=codec_type,pts_time', '-of', 'json', join(FIXTURE_DIR, name),
+  ], { maxBuffer: 64 * 1024 * 1024 })
+  const { streams, packets } = JSON.parse(stdout)
+  const start = Math.max(0, Number(streams.find((stream) => stream.codec_type === 'video').start_time))
+  const of = (kind) => packets.filter((packet) => packet.codec_type === kind).map((packet) => Number(packet.pts_time) - start)
+  return { video: of('video'), audio: of('audio') }
+}
+
+/** the packet nearest the run's first sample, then each sample after it at the time of the packet after that one */
+const expectOwnTimes = (label, written, source) => {
+  expect(written.length, `${label}: no samples`).toBeGreaterThan(10)
+  let at = 0
+  for (let i = 1; i < source.length; i++) if (Math.abs(source[i] - written[0]) < Math.abs(source[at] - written[0])) at = i
+  const wrong = written.findIndex((time, i) => !(Math.abs(time - source[at + i]) < 0.001))
+  expect(wrong, `${label}: sample ${wrong} at ${written[wrong]}, its packet at ${source[at + wrong]}`).toBe(-1)
+}
+
+/**
+ * Every track at its own time from the start of the content once init's timestampOffset is added, as the subtitles,
+ * the index and every seek target are. Fragments without an edit list used to be shifted by the lowest first decode
+ * time, and with B-frames that sits 2 frames before the first picture, so the picture and the sound were written
+ * 83 ms late, at load and after every seek (0.8.13).
+ */
+test.describe('the timeline', () => {
+  const CASES = [
+    { name: 'h264-bframes-aac.mkv', why: 'with B-frames', reorders: true },
+    { name: 'h264-aac.ts', why: 'whose clock starts at 600 s' },
+    // the browser's answer does not matter here, and passing ac3 through is the one path that holds the moov back
+    { name: 'h264-ac3.mkv', why: 'with ac3 passed through', audioCodecs: ['aac', 'ac3'] },
+  ]
+  for (const { name, why, reorders, audioCodecs } of CASES) {
+    test(`a file ${why} is written at its own times, at load and after a seek`, async ({ page }) => {
+      await open(page)
+      const source = await sourceTimes(name)
+      if (reorders) expect(source.video.some((time, i) => time < source.video[i - 1]), 'the fixture has no B-frames').toBe(true)
+      for (const target of [undefined, 12]) {
+        const when = target === undefined ? 'at load' : `after a seek to ${target}`
+        const written = await page.evaluate(([name, options]) => window.harness.timeline(name, options), [name, { target, audioCodecs }])
+        expectOwnTimes(`${name} video ${when}`, written.video, source.video)
+        expectOwnTimes(`${name} audio ${when}`, written.audio, source.audio)
+        expect(written.timestampOffset, `${name} ${when}`).toBe(-10)
+        expect(written.editLists, `${name} ${when}: edit lists`).toBe(0)
+      }
+    })
+  }
 })
 
 test.describe('thumbnails', () => {

@@ -38,7 +38,93 @@ const centrePixel = async (png) => {
   return { r: data[0], g: data[1], b: data[2], ...size }
 }
 
+/**
+ * Reads fragmented mp4 into `state`: each track's timescale and kind from a moov, how many edit lists it carries, and,
+ * when `collect` is set, every sample's presentation time in seconds as the bytes write it, per kind in decode order.
+ */
+const readMp4 = (state, buffer, collect) => {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer)
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const fourcc = (at) => String.fromCharCode(...bytes.subarray(at, at + 4))
+  const children = (start, end) => {
+    const found = []
+    for (let at = start; at + 8 <= end;) {
+      const size = view.getUint32(at)
+      if (size < 8) break
+      found.push({ type: fourcc(at + 4), start: at + 8, end: at + size })
+      at += size
+    }
+    return found
+  }
+  const child = (box, type) => children(box.start, box.end).find((b) => b.type === type)
+  const flagsOf = (box) => view.getUint32(box.start) & 0xffffff
+  for (const top of children(0, bytes.byteLength)) {
+    if (top.type === 'moov') {
+      const mvex = child(top, 'mvex')
+      for (const trex of mvex ? children(mvex.start, mvex.end).filter((b) => b.type === 'trex') : []) {
+        state.defaultDuration.set(view.getUint32(trex.start + 4), view.getUint32(trex.start + 12))
+      }
+      for (const trak of children(top.start, top.end).filter((b) => b.type === 'trak')) {
+        const tkhd = child(trak, 'tkhd'), mdia = child(trak, 'mdia'), mdhd = child(mdia, 'mdhd')
+        const id = view.getUint32(tkhd.start + (bytes[tkhd.start] ? 20 : 12))
+        const timescale = view.getUint32(mdhd.start + (bytes[mdhd.start] ? 20 : 12))
+        const kind = fourcc(child(mdia, 'hdlr').start + 8) === 'vide' ? 'video' : 'audio'
+        state.tracks.set(id, { timescale, kind })
+        if (child(trak, 'edts')) state.editLists++
+      }
+    }
+    if (top.type !== 'moof' || !collect) continue
+    for (const traf of children(top.start, top.end).filter((b) => b.type === 'traf')) {
+      const tfhd = child(traf, 'tfhd'), tfdt = child(traf, 'tfdt')
+      const id = view.getUint32(tfhd.start + 4), track = state.tracks.get(id), tfhdFlags = flagsOf(tfhd)
+      let at = tfhd.start + 8 + (tfhdFlags & 0x01 ? 8 : 0) + (tfhdFlags & 0x02 ? 4 : 0)
+      const defaultDuration = tfhdFlags & 0x08 ? view.getUint32(at) : state.defaultDuration.get(id)
+      let dts = bytes[tfdt.start] ? Number(view.getBigUint64(tfdt.start + 4)) : view.getUint32(tfdt.start + 4)
+      for (const trun of children(traf.start, traf.end).filter((b) => b.type === 'trun')) {
+        const flags = flagsOf(trun), signed = bytes[trun.start] === 1, count = view.getUint32(trun.start + 4)
+        at = trun.start + 8 + (flags & 0x01 ? 4 : 0) + (flags & 0x04 ? 4 : 0)
+        for (let i = 0; i < count; i++) {
+          let duration = defaultDuration, composition = 0
+          if (flags & 0x100) { duration = view.getUint32(at); at += 4 }
+          if (flags & 0x200) at += 4
+          if (flags & 0x400) at += 4
+          if (flags & 0x800) { composition = signed ? view.getInt32(at) : view.getUint32(at); at += 4 }
+          state.samples[track.kind].push((dts + composition) / track.timescale)
+          dts += duration
+        }
+      }
+    }
+  }
+}
+
 window.harness = {
+  /**
+   * Where the bytes put each sample, with the init segment's `timestampOffset` added as a SourceBuffer would: from
+   * the start of the file, or from a seek to `target`, over that call and `reads` more.
+   */
+  async timeline(name, { target, reads = 2, audioCodecs } = {}) {
+    const { length, read } = await sourceFor(name)
+    const remuxer = await makeRemuxer({ ...common(length, read), ...(audioCodecs ? { audioCodecs } : {}) })
+    try {
+      const init = await remuxer.init()
+      const state = { tracks: new Map(), defaultDuration: new Map(), editLists: 0, samples: { video: [], audio: [] } }
+      readMp4(state, init.data, target === undefined)
+      if (target !== undefined) readMp4(state, (await remuxer.seek(target)).data, true)
+      for (let i = 0; i < reads; i++) {
+        const chunk = await remuxer.read()
+        if (chunk.data?.byteLength) readMp4(state, chunk.data, true)
+        if (chunk.finished) break
+      }
+      const offset = init.timestampOffset ?? 0
+      return {
+        timestampOffset: init.timestampOffset,
+        editLists: state.editLists,
+        video: state.samples.video.map((time) => time + offset),
+        audio: state.samples.audio.map((time) => time + offset),
+      }
+    } finally { await remuxer.destroy() }
+  },
+
   async remux(name, { workerUrl, audioCodecs } = {}) {
     const { length, read } = await sourceFor(name)
     const remuxer = await makeRemuxer({

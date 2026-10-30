@@ -130,6 +130,7 @@ typedef struct InitResult {
   std::vector<Index> indexes;
   std::vector<Chapter> chapters;
   std::vector<uint8_t> video_extradata;
+  double timestamp_offset;
 } InitResult;
 
 typedef struct ReadResult {
@@ -337,6 +338,12 @@ public:
   std::set<std::string> browser_audio_codecs;
   /** set between write_header and the delayed moov reaching avio_write */
   bool header_pending = false;
+
+  /**
+   * Every timestamp written is content time plus this, so nothing is negative: a B-frame stream's first decode times
+   * and an audio track's priming sit before 0. `init()` reports minus it as the SourceBuffer's timestampOffset.
+   */
+  static constexpr int OUTPUT_TS_OFFSET_SECONDS = 10;
 
   /** audio reaches the browser untouched only if the muxer can carry it AND the browser can decode it */
   bool audio_passthrough_ok(AVCodecID codec_id) const {
@@ -1434,10 +1441,23 @@ public:
       &opts,
       "movflags",
       header_pending
-        ? "frag_custom+empty_moov+default_base_moof+delay_moov"
-        : "frag_custom+empty_moov+default_base_moof",
+        ? "frag_custom+empty_moov+default_base_moof+delay_moov+frag_discont"
+        : "frag_custom+empty_moov+default_base_moof+frag_discont",
       0
     );
+    /*
+     * Each track at its own content time plus OUTPUT_TS_OFFSET_SECONDS, at load and after every seek. FFmpeg's
+     * default for fragments without an edit list shifts every track by the lowest first decode time, which on a
+     * B-frame stream wrote the picture and the sound 2 frames after the subtitles and the index (82 ms at 23.976 fps,
+     * in Chrome 155 and Firefox 157). Each of the four is needed, as the timeline tests show: without frag_discont a
+     * track's decode times start from its own first packet, without avoid_negative_ts the shift comes back, without
+     * the offset the first decode time is negative, and without use_editlist movenc keeps edit lists once nothing may
+     * be shifted, which moves a B-frame stream's pictures and starts each delay_moov seek run with an empty edit,
+     * one Chrome ignores and Firefox plays at twice its time.
+     */
+    av_dict_set(&opts, "use_editlist", "0", 0);
+    av_dict_set(&opts, "avoid_negative_ts", "disabled", 0);
+    av_dict_set(&opts, "output_ts_offset", std::to_string(OUTPUT_TS_OFFSET_SECONDS).c_str(), 0);
 
     // synchronously drives the custom avio_write, which is how the mp4 init segment lands in write_vector and is returned as result.data
     int ret = avformat_write_header(output_format_context, &opts);
@@ -1793,6 +1813,7 @@ public:
     result.subtitles = subtitles;
     result.audio_streams = audio_streams;
     result.info = infoObj;
+    result.timestamp_offset = -OUTPUT_TS_OFFSET_SECONDS;
 
     for (int i = 0; i < input_format_context->nb_chapters; i++) {
       AVChapter *av_chapter = input_format_context->chapters[i];
@@ -2385,7 +2406,8 @@ EMSCRIPTEN_BINDINGS(libav_wasm_simplified) {
     .field("chapters",    &InitResult::chapters)
     .field("indexes",     &InitResult::indexes)
     .field("info",        &InitResult::info)
-    .field("videoExtradata", &InitResult::video_extradata);
+    .field("videoExtradata", &InitResult::video_extradata)
+    .field("timestampOffset", &InitResult::timestamp_offset);
 
   emscripten::value_object<ReadResult>("ReadResult")
     .field("data",      &ReadResult::data)

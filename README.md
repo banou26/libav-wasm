@@ -22,7 +22,10 @@ carry never costs you the file. Thumbnails have none of these limits: they decod
 pixels, so they work on files that cannot be remuxed at all.
 
 Timestamps are reported relative to the start of the content, so a format whose clock starts elsewhere
-(mpegts) still lines up with a player's timeline.
+(mpegts) still lines up with a player's timeline. The fragments carry the same times plus 10 s, every track at its
+own, at load and after every seek, with no edit list: the 10 s keeps a B-frame stream's first decode times and an
+audio track's priming, which come before 0, from being negative, and `init()` hands back the `timestampOffset` that
+takes it off again.
 
 ## Usage
 
@@ -41,9 +44,11 @@ const remuxer = await makeRemuxer({
 })
 
 // the mp4 init segment, plus every piece of metadata the file carries
-const { data, info, indexes, subtitles, attachments, chapters } = await remuxer.init()
+const { data, info, indexes, subtitles, attachments, chapters, timestampOffset } = await remuxer.init()
 const codecs = [info.output.videoMimeType, info.output.audioMimeType].filter(Boolean).join(',')
 const mime = `video/mp4; codecs="${codecs}"`
+// once, before the first append, and never again: every fragment, after any seek too, is written at its own time
+sourceBuffer.timestampOffset = timestampOffset
 
 // { data, pts, duration, offset, finished }: data appends straight to a SourceBuffer
 const chunk = await remuxer.read()

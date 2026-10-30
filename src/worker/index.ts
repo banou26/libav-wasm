@@ -143,6 +143,7 @@ export interface RemuxerInstance {
       }
     }
     videoExtradata: WASMVector<number>
+    timestampOffset: number
   }>
   destroy: () => void
   seek: (read: WASMReadFunction, timestamp: number) => Promise<{
@@ -201,6 +202,11 @@ export type Remuxer = {
     chapters: Chapter[]
     indexes: Index[]
     videoExtradata: ArrayBuffer
+    /**
+     * What the SourceBuffer's timestampOffset is set to, once, before the first append: every fragment, at load and
+     * after any seek, carries each track's content time minus this.
+     */
+    timestampOffset: number
   }>
   destroy: () => void
   seek: (read: WASMReadFunction, timestamp: number) => Promise<{
@@ -342,6 +348,7 @@ const resolvers = {
         typedArray.set(result.data)
         return {
           data: typedArray.buffer,
+          timestampOffset: result.timestampOffset,
           videoExtradata: new Uint8Array(vectorToArray(result.videoExtradata)).buffer,
           attachments: vectorToArray(result.attachments).map(attachment => {
             const data = new Uint8Array(module.HEAPU8.buffer, attachment.ptr, attachment.size)
