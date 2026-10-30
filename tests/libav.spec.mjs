@@ -435,24 +435,45 @@ test.describe('seeking', () => {
   })
 })
 
-/** each packet's time from the start of the content, per kind in the file's order, as ffprobe reads it */
-const sourceTimes = async (name) => {
-  const { stdout } = await promisify(execFile)('ffprobe', [
-    '-v', 'error', '-show_entries', 'stream=codec_type,start_time:packet=codec_type,pts_time', '-of', 'json', join(FIXTURE_DIR, name),
-  ], { maxBuffer: 64 * 1024 * 1024 })
+/**
+ * Each packet per kind in the file's order, as ffprobe reads it: its time from the start of the content, whether it is
+ * a keyframe, and its last 8 bytes as hex, which the mp4 carries as they are (mpegts's ADTS header comes off the front).
+ */
+const sourcePackets = async (name) => {
+  const file = join(FIXTURE_DIR, name), run = promisify(execFile), maxBuffer = 64 * 1024 * 1024
+  const { stdout } = await run('ffprobe', [
+    '-v', 'error', '-show_entries', 'stream=codec_type,start_time:packet=codec_type,pts_time,flags,size', '-of', 'json', file,
+  ], { maxBuffer })
+  const { stdout: bytes } = await run('ffmpeg', [
+    '-v', 'error', '-i', file, '-map', '0:a:0', '-c', 'copy', '-f', 'data', '-',
+  ], { encoding: 'buffer', maxBuffer })
   const { streams, packets } = JSON.parse(stdout)
   const start = Math.max(0, Number(streams.find((stream) => stream.codec_type === 'video').start_time))
-  const of = (kind) => packets.filter((packet) => packet.codec_type === kind).map((packet) => Number(packet.pts_time) - start)
-  return { video: of('video'), audio: of('audio') }
+  const of = (kind) => packets.filter((packet) => packet.codec_type === kind)
+  const video = of('video').map((packet) => ({ time: Number(packet.pts_time) - start, key: packet.flags.includes('K') }))
+  let end = 0
+  const audio = of('audio').map((packet) => {
+    end += Number(packet.size)
+    return { time: Number(packet.pts_time) - start, tail: bytes.subarray(end - 8, end).toString('hex') }
+  })
+  expect(end, `${name}: audio bytes`).toBe(bytes.length)
+  return { video, audio }
 }
 
-/** the packet nearest the run's first sample, then each sample after it at the time of the packet after that one */
-const expectOwnTimes = (label, written, source) => {
+/**
+ * Each sample of a run at the time of its own packet. Which packet the run starts from is not left to the times, or a
+ * track written whole frames late would line up on the frames after it: it is the keyframe nearest the run's first
+ * sample, or for audio the nearest packet ending in the same bytes (the fixtures' sine repeats a frame 0.8 s apart).
+ */
+const expectOwnTimes = (label, written, source, startsAt) => {
   expect(written.length, `${label}: no samples`).toBeGreaterThan(10)
-  let at = 0
-  for (let i = 1; i < source.length; i++) if (Math.abs(source[i] - written[0]) < Math.abs(source[at] - written[0])) at = i
-  const wrong = written.findIndex((time, i) => !(Math.abs(time - source[at + i]) < 0.001))
-  expect(wrong, `${label}: sample ${wrong} at ${written[wrong]}, its packet at ${source[at + wrong]}`).toBe(-1)
+  let at = -1
+  for (let i = 0; i < source.length; i++) {
+    if (startsAt(source[i]) && (at < 0 || Math.abs(source[i].time - written[0]) < Math.abs(source[at].time - written[0]))) at = i
+  }
+  expect(at, `${label}: the packet it starts from`).toBeGreaterThanOrEqual(0)
+  const wrong = written.findIndex((time, i) => !(Math.abs(time - source[at + i]?.time) < 0.001))
+  expect(wrong, `${label}: sample ${wrong} at ${written[wrong]}, its packet at ${source[at + wrong]?.time}`).toBe(-1)
 }
 
 /**
@@ -471,13 +492,14 @@ test.describe('the timeline', () => {
   for (const { name, why, reorders, audioCodecs } of CASES) {
     test(`a file ${why} is written at its own times, at load and after a seek`, async ({ page }) => {
       await open(page)
-      const source = await sourceTimes(name)
-      if (reorders) expect(source.video.some((time, i) => time < source.video[i - 1]), 'the fixture has no B-frames').toBe(true)
+      const source = await sourcePackets(name)
+      const reordered = source.video.some(({ time }, i) => i > 0 && time < source.video[i - 1].time)
+      if (reorders) expect(reordered, 'the fixture has no B-frames').toBe(true)
       for (const target of [undefined, 12]) {
         const when = target === undefined ? 'at load' : `after a seek to ${target}`
         const written = await page.evaluate(([name, options]) => window.harness.timeline(name, options), [name, { target, audioCodecs }])
-        expectOwnTimes(`${name} video ${when}`, written.video, source.video)
-        expectOwnTimes(`${name} audio ${when}`, written.audio, source.audio)
+        expectOwnTimes(`${name} video ${when}`, written.video, source.video, ({ key }) => key)
+        expectOwnTimes(`${name} audio ${when}`, written.audio, source.audio, ({ tail }) => tail === written.audioStart)
         expect(written.timestampOffset, `${name} ${when}`).toBe(-10)
         expect(written.editLists, `${name} ${when}: edit lists`).toBe(0)
       }

@@ -40,7 +40,8 @@ const centrePixel = async (png) => {
 
 /**
  * Reads fragmented mp4 into `state`: each track's timescale and kind from a moov, how many edit lists it carries, and,
- * when `collect` is set, every sample's presentation time in seconds as the bytes write it, per kind in decode order.
+ * when `collect` is set, every sample's presentation time in seconds as the bytes write it, per kind in decode order,
+ * and the last 8 bytes of the first audio sample, as hex.
  */
 const readMp4 = (state, buffer, collect) => {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer)
@@ -62,7 +63,8 @@ const readMp4 = (state, buffer, collect) => {
     if (top.type === 'moov') {
       const mvex = child(top, 'mvex')
       for (const trex of mvex ? children(mvex.start, mvex.end).filter((b) => b.type === 'trex') : []) {
-        state.defaultDuration.set(view.getUint32(trex.start + 4), view.getUint32(trex.start + 12))
+        const id = view.getUint32(trex.start + 4)
+        state.defaults.set(id, { duration: view.getUint32(trex.start + 12), size: view.getUint32(trex.start + 16) })
       }
       for (const trak of children(top.start, top.end).filter((b) => b.type === 'trak')) {
         const tkhd = child(trak, 'tkhd'), mdia = child(trak, 'mdia'), mdhd = child(mdia, 'mdhd')
@@ -78,18 +80,26 @@ const readMp4 = (state, buffer, collect) => {
       const tfhd = child(traf, 'tfhd'), tfdt = child(traf, 'tfdt')
       const id = view.getUint32(tfhd.start + 4), track = state.tracks.get(id), tfhdFlags = flagsOf(tfhd)
       let at = tfhd.start + 8 + (tfhdFlags & 0x01 ? 8 : 0) + (tfhdFlags & 0x02 ? 4 : 0)
-      const defaultDuration = tfhdFlags & 0x08 ? view.getUint32(at) : state.defaultDuration.get(id)
+      const defaultDuration = tfhdFlags & 0x08 ? view.getUint32(at) : state.defaults.get(id).duration
+      if (tfhdFlags & 0x08) at += 4
+      const defaultSize = tfhdFlags & 0x10 ? view.getUint32(at) : state.defaults.get(id).size
       let dts = bytes[tfdt.start] ? Number(view.getBigUint64(tfdt.start + 4)) : view.getUint32(tfdt.start + 4)
       for (const trun of children(traf.start, traf.end).filter((b) => b.type === 'trun')) {
         const flags = flagsOf(trun), signed = bytes[trun.start] === 1, count = view.getUint32(trun.start + 4)
+        // default-base-is-moof: a run's data offset counts from the first byte of its moof
+        let data = top.start - 8 + (flags & 0x01 ? view.getInt32(trun.start + 8) : 0)
         at = trun.start + 8 + (flags & 0x01 ? 4 : 0) + (flags & 0x04 ? 4 : 0)
         for (let i = 0; i < count; i++) {
-          let duration = defaultDuration, composition = 0
+          let duration = defaultDuration, size = defaultSize, composition = 0
           if (flags & 0x100) { duration = view.getUint32(at); at += 4 }
-          if (flags & 0x200) at += 4
+          if (flags & 0x200) { size = view.getUint32(at); at += 4 }
           if (flags & 0x400) at += 4
           if (flags & 0x800) { composition = signed ? view.getInt32(at) : view.getUint32(at); at += 4 }
           state.samples[track.kind].push((dts + composition) / track.timescale)
+          if (track.kind === 'audio' && state.audioStart === undefined) {
+            state.audioStart = [...bytes.subarray(data + size - 8, data + size)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+          }
+          data += size
           dts += duration
         }
       }
@@ -107,7 +117,7 @@ window.harness = {
     const remuxer = await makeRemuxer({ ...common(length, read), ...(audioCodecs ? { audioCodecs } : {}) })
     try {
       const init = await remuxer.init()
-      const state = { tracks: new Map(), defaultDuration: new Map(), editLists: 0, samples: { video: [], audio: [] } }
+      const state = { tracks: new Map(), defaults: new Map(), editLists: 0, samples: { video: [], audio: [] } }
       readMp4(state, init.data, target === undefined)
       if (target !== undefined) readMp4(state, (await remuxer.seek(target)).data, true)
       for (let i = 0; i < reads; i++) {
@@ -121,6 +131,7 @@ window.harness = {
         editLists: state.editLists,
         video: state.samples.video.map((time) => time + offset),
         audio: state.samples.audio.map((time) => time + offset),
+        audioStart: state.audioStart,
       }
     } finally { await remuxer.destroy() }
   },
