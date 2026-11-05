@@ -12,6 +12,7 @@ import { mkdir, readFile, writeFile, readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
+import { crc32 } from 'node:zlib'
 
 const run = promisify(execFile)
 
@@ -101,6 +102,7 @@ export const FIXTURES = [
     name: 'h264-aac71.mkv',
     why: "FFmpeg's aac encoder numbers 7.1 as 12, past the last layout Chrome knows, and Chrome refuses the whole init segment for it",
     seconds: 10,
+    renumberAac71: true,
     inputs: inputs(),
     args: [...encode(), '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '20', '-pix_fmt', 'yuv420p', '-af', 'pan=7.1|c0=c0|c1=c0|c2=c0|c3=c0|c4=c0|c5=c0|c6=c0|c7=c0', '-c:a', 'aac'],
   },
@@ -340,7 +342,56 @@ ${chapters.map(([title, start], index) => `  <ChapterAtom><ChapterUID>${(edition
 
 /** the spec decides the bytes, so its hash decides whether a cached fixture is still valid */
 const specHash = (fixture) =>
-  createHash('sha256').update(JSON.stringify([fixture.inputs, fixture.args, fixture.seconds, fixture.subtitles, fixture.cover, fixture.maps, SECOND_STEP, ...(fixture.chapters ? [fixture.chapters, fixture.defaultEdition] : [])])).digest('hex').slice(0, 16)
+  createHash('sha256').update(JSON.stringify([fixture.inputs, fixture.args, fixture.seconds, fixture.subtitles, fixture.cover, fixture.maps, SECOND_STEP, ...(fixture.chapters ? [fixture.chapters, fixture.defaultEdition] : []), ...(fixture.renumberAac71 ? ['renumberAac71'] : [])])).digest('hex').slice(0, 16)
+
+/** an element id keeps its length marker, a size drops it */
+const vint = (bytes, at, keepMarker) => {
+  const length = Math.clz32(bytes[at]) - 23
+  let value = keepMarker ? bytes[at] : bytes[at] & (0xff >> length)
+  for (let i = 1; i < length; i++) value = value * 256 + bytes[at + i]
+  return { value, end: at + length }
+}
+
+const children = (bytes, start, end, id) => {
+  const found = []
+  for (let at = start; at < end;) {
+    const element = vint(bytes, at, true)
+    const size = vint(bytes, element.end)
+    const next = Math.min(size.end + size.value, end)
+    found.push({ id: element.value, data: size.end, end: next })
+    at = next
+  }
+  return id === undefined ? found : found.filter(element => element.id === id)
+}
+
+const MATROSKA = { segment: 0x18538067, tracks: 0x1654ae6b, trackEntry: 0xae, codecId: 0x86, codecPrivate: 0x63a2, crc32: 0xbf }
+
+/**
+ * FFmpeg 6.1.6 and 7.1.5 number 7.1 aac as channel configuration 7 and 9.0.2 numbers it 12 (measured 2026-11-06).
+ * Both carry the same syntactic elements in the same order, so a 7 becomes 12 and the fixture is the same whichever
+ * ffmpeg built it.
+ */
+const renumberAac71 = async (path) => {
+  const bytes = await readFile(path)
+  const [segment] = children(bytes, 0, bytes.length, MATROSKA.segment)
+  const [tracks] = children(bytes, segment.data, segment.end, MATROSKA.tracks)
+  for (const entry of children(bytes, tracks.data, tracks.end, MATROSKA.trackEntry)) {
+    const [codec] = children(bytes, entry.data, entry.end, MATROSKA.codecId)
+    const [config] = children(bytes, entry.data, entry.end, MATROSKA.codecPrivate)
+    if (!config || !bytes.toString('latin1', codec.data, codec.end).startsWith('A_AAC')) continue
+    // AudioSpecificConfig: object type in 5 bits (31 escapes to 6 more), frequency index in 4 (15 escapes to 24 more), channels in 4
+    let bits = [...bytes.subarray(config.data, config.end)].map(byte => byte.toString(2).padStart(8, '0')).join('')
+    let at = parseInt(bits.slice(0, 5), 2) === 31 ? 11 : 5
+    at += parseInt(bits.slice(at, at + 4), 2) === 15 ? 28 : 4
+    if (bits.slice(at, at + 4) !== '0111') continue
+    bits = bits.slice(0, at) + '1100' + bits.slice(at + 4)
+    for (let i = 0; config.data + i < config.end; i++) bytes[config.data + i] = parseInt(bits.slice(i * 8, i * 8 + 8), 2)
+    // a CRC-32 first in Tracks covers the rest of it
+    const [crc] = children(bytes, tracks.data, tracks.end)
+    if (crc.id === MATROSKA.crc32) bytes.writeUInt32LE(crc32(bytes.subarray(crc.end, tracks.end)), crc.data)
+    await writeFile(path, bytes)
+  }
+}
 
 const build = async (fixture) => {
   const target = join(FIXTURE_DIR, fixture.name)
@@ -381,6 +432,7 @@ const build = async (fixture) => {
     await writeFile(chaptersPath, chaptersXml(fixture.chapters, fixture.defaultEdition))
     await run('mkvmerge', ['--quiet', '--output', target, '--chapters', chaptersPath, plainPath])
   }
+  if (fixture.renumberAac71) await renumberAac71(target)
   await writeFile(stampPath, hash)
   return { ...fixture, path: target, cached: false }
 }
