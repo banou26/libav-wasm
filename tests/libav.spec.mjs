@@ -182,6 +182,29 @@ test.describe('remuxing', () => {
       expect(passedThrough.segments[i].pts).toBeGreaterThan(passedThrough.segments[i - 1].pts)
     }
   })
+
+  /**
+   * RIPPLE-53: a film with 5.1(side) aac played in Firefox and not at all in Chrome, whose mp4 parser refuses an
+   * AudioSpecificConfig naming its layout in a program config element. The same 5.1 named by number is the control:
+   * it passes through with all six channels, so only the refused config is re-encoded.
+   */
+  test('aac with its layout in a program config element re-encodes and plays, and 5.1 by number passes through', async ({ page }) => {
+    const channelConfiguration = async (name) => {
+      const { stdout } = await promisify(execFile)('ffprobe', ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=extradata', '-show_data', join(FIXTURE_DIR, name)])
+      const [, first] = /0{8}: ([0-9a-f]{4})/.exec(stdout)
+      return (parseInt(first, 16) >> 3) & 0xf
+    }
+    expect(await channelConfiguration('h264-aac51-pce.mkv'), 'the fixture has to name its layout in a PCE').toBe(0)
+    expect(await channelConfiguration('h264-aac51.mkv')).toBe(6)
+
+    await open(page)
+    const pce = await page.evaluate(() => window.harness.playable('h264-aac51-pce.mkv'))
+    expect(pce.buffered, JSON.stringify(pce)).toBeGreaterThan(0)
+    expect(pce.audioChannels).toBe(2)
+    const byNumber = await page.evaluate(() => window.harness.playable('h264-aac51.mkv'))
+    expect(byNumber.buffered, JSON.stringify(byNumber)).toBeGreaterThan(0)
+    expect(byNumber.audioChannels).toBe(6)
+  })
 })
 
 test.describe('chapters', () => {

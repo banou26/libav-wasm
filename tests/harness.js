@@ -209,7 +209,11 @@ window.harness = {
       const audioMimeType = init.info.output.audioMimeType
       const codecs = [videoMimeType, audioMimeType].filter(Boolean).join(',')
       const mime = `video/mp4; codecs="${codecs}"`
-      const detail = { mime, videoMimeType, audioMimeType }
+      const header = init.data instanceof Uint8Array ? init.data : new Uint8Array(init.data)
+      const entry = header.findIndex((_, at) => String.fromCharCode(...header.subarray(at, at + 4)) === 'mp4a')
+      // the AudioSampleEntry's channelcount, 20 bytes past the box type
+      const audioChannels = entry < 0 ? undefined : (header[entry + 20] << 8) | header[entry + 21]
+      const detail = { mime, videoMimeType, audioMimeType, audioChannels }
       if (!MediaSource.isTypeSupported(mime)) return { ...detail, supported: false }
 
       const chunks = []

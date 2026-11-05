@@ -84,6 +84,20 @@ export const FIXTURES = [
     args: [...encode(), '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'eac3'],
   },
   {
+    name: 'h264-aac51-pce.mkv',
+    why: "5.1(side) aac names its layout in a program config element, and Chrome refuses the whole init segment for it",
+    seconds: 10,
+    inputs: inputs(),
+    args: [...encode(), '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '20', '-pix_fmt', 'yuv420p', '-af', 'pan=5.1(side)|c0=c0|c1=c0|c2=c0|c3=c0|c4=c0|c5=c0', '-c:a', 'aac'],
+  },
+  {
+    name: 'h264-aac51.mkv',
+    why: 'the same 5.1 named by number, which every browser takes, so it still passes through',
+    seconds: 10,
+    inputs: inputs(),
+    args: [...encode(), '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '20', '-pix_fmt', 'yuv420p', '-af', 'pan=5.1|c0=c0|c1=c0|c2=c0|c3=c0|c4=c0|c5=c0', '-c:a', 'aac'],
+  },
+  {
     name: 'hevc10-aac.mkv',
     why: 'hevc offers no prefer-software WebCodecs decoder, and a hardware one repeats frame one',
     seconds: 30,
