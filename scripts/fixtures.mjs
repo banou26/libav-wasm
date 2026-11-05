@@ -98,6 +98,13 @@ export const FIXTURES = [
     args: [...encode(), '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '20', '-pix_fmt', 'yuv420p', '-af', 'pan=5.1|c0=c0|c1=c0|c2=c0|c3=c0|c4=c0|c5=c0', '-c:a', 'aac'],
   },
   {
+    name: 'h264-aac71.mkv',
+    why: "FFmpeg's aac encoder numbers 7.1 as 12, past the last layout Chrome knows, and Chrome refuses the whole init segment for it",
+    seconds: 10,
+    inputs: inputs(),
+    args: [...encode(), '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '20', '-pix_fmt', 'yuv420p', '-af', 'pan=7.1|c0=c0|c1=c0|c2=c0|c3=c0|c4=c0|c5=c0|c6=c0|c7=c0', '-c:a', 'aac'],
+  },
+  {
     name: 'hevc10-aac.mkv',
     why: 'hevc offers no prefer-software WebCodecs decoder, and a hardware one repeats frame one',
     seconds: 30,

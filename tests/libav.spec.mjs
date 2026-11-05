@@ -184,26 +184,29 @@ test.describe('remuxing', () => {
   })
 
   /**
-   * RIPPLE-53: a film with 5.1(side) aac played in Firefox and not at all in Chrome, whose mp4 parser refuses an
-   * AudioSpecificConfig naming its layout in a program config element. The same 5.1 named by number is the control:
-   * it passes through with all six channels, so only the refused config is re-encoded.
+   * Chrome's mp4 parser refuses an aac channelConfiguration of 0 (the layout named in a program config element) or of
+   * 8 and up, and with it the whole init segment, where Firefox plays both. The same 5.1 named by number is the
+   * control: it passes through with all six channels, so only a refused layout is re-encoded.
    */
-  test('aac with its layout in a program config element re-encodes and plays, and 5.1 by number passes through', async ({ page }) => {
+  test('aac in a layout Chrome refuses re-encodes and plays, and 5.1 by number passes through', async ({ page }) => {
     const channelConfiguration = async (name) => {
       const { stdout } = await promisify(execFile)('ffprobe', ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=extradata', '-show_data', join(FIXTURE_DIR, name)])
       const [, first] = /0{8}: ([0-9a-f]{4})/.exec(stdout)
       return (parseInt(first, 16) >> 3) & 0xf
     }
     expect(await channelConfiguration('h264-aac51-pce.mkv'), 'the fixture has to name its layout in a PCE').toBe(0)
+    expect(await channelConfiguration('h264-aac71.mkv'), 'the fixture has to number its layout past 7').toBe(12)
     expect(await channelConfiguration('h264-aac51.mkv')).toBe(6)
 
     await open(page)
-    const pce = await page.evaluate(() => window.harness.playable('h264-aac51-pce.mkv'))
-    expect(pce.buffered, JSON.stringify(pce)).toBeGreaterThan(0)
-    expect(pce.audioChannels).toBe(2)
-    const byNumber = await page.evaluate(() => window.harness.playable('h264-aac51.mkv'))
-    expect(byNumber.buffered, JSON.stringify(byNumber)).toBeGreaterThan(0)
-    expect(byNumber.audioChannels).toBe(6)
+    const expectPlays = async (name, audioChannels) => {
+      const result = await page.evaluate((name) => window.harness.playable(name), name)
+      expect(result, name).toMatchObject({ buffered: expect.any(Number), audioChannels })
+      expect(result.buffered, name).toBeGreaterThan(0)
+    }
+    await expectPlays('h264-aac51-pce.mkv', 2)
+    await expectPlays('h264-aac71.mkv', 2)
+    await expectPlays('h264-aac51.mkv', 6)
   })
 })
 
