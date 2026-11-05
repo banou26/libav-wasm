@@ -70,13 +70,14 @@ static inline const char* audio_passthrough_name(AVCodecID codec_id) {
 }
 
 /**
- * Whether an aac track names its channel layout in a program config element (channelConfiguration 0 in its
- * AudioSpecificConfig, ISO/IEC 14496-3 1.6.2.1) rather than by number. FFmpeg's aac encoder writes one for every
- * layout without a number, 5.1(side) among them, which is the 5.1 a WEB source carries. Chromium's mp4 parser
- * refuses it (`RCHECK(channel_config_ != 0)` in media/formats/mp4/aac.cc), so the whole init segment fails there,
- * while Firefox plays it: measured 2026-11-05 on Chrome 156 and Firefox 157 (RIPPLE-53).
+ * Whether an aac track's channelConfiguration (AudioSpecificConfig, ISO/IEC 14496-3 1.6.2.1) is one Chromium's mp4
+ * parser has no layout for: 0, which names the layout in a program config element, or 8 and up. Chromium refuses
+ * both (`RCHECK(channel_config_ != 0)` and `channel_config_ >= kADTSChannelLayoutTable.size()` in
+ * media/formats/mp4/aac.cc), and with them the whole init segment, while Firefox plays them. FFmpeg's aac encoder
+ * writes 0 for every layout without a number, 5.1(side) among them, which is how it reads the 5.1 of an E-AC-3
+ * source, 11 for 6.1(back) and 12 for 7.1. Measured 2026-11-05 on Chrome 156 and Firefox 157.
  */
-static bool aac_layout_in_pce(const AVCodecParameters* par) {
+static bool chrome_refuses_aac_layout(const AVCodecParameters* par) {
   if (par->codec_id != AV_CODEC_ID_AAC || !par->extradata || par->extradata_size < 2) return false;
   const int size = std::min(par->extradata_size, 8);
   uint64_t bits = 0;
@@ -89,7 +90,9 @@ static bool aac_layout_in_pce(const AVCodecParameters* par) {
   };
   if (read(5) == 31) read(6);
   if (read(4) == 15) read(24);
-  return at + 4 <= size * 8 && read(4) == 0;
+  if (at + 4 > size * 8) return false;
+  const uint64_t config = read(4);
+  return config == 0 || config >= 8;
 }
 
 
@@ -371,7 +374,7 @@ public:
   /** audio reaches the browser untouched only if the muxer can carry it AND the browser can decode it */
   bool audio_passthrough_ok(const AVCodecParameters* par) const {
     const char* name = audio_passthrough_name(par->codec_id);
-    return name && browser_audio_codecs.count(name) > 0 && !aac_layout_in_pce(par);
+    return name && browser_audio_codecs.count(name) > 0 && !chrome_refuses_aac_layout(par);
   }
 
   // Everything else audio, from dts through vorbis, mp3, wma and raw pcm, re-encodes to aac rather than
