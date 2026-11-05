@@ -69,6 +69,29 @@ static inline const char* audio_passthrough_name(AVCodecID codec_id) {
   }
 }
 
+/**
+ * Whether an aac track names its channel layout in a program config element (channelConfiguration 0 in its
+ * AudioSpecificConfig, ISO/IEC 14496-3 1.6.2.1) rather than by number. FFmpeg's aac encoder writes one for every
+ * layout without a number, 5.1(side) among them, which is the 5.1 a WEB source carries. Chromium's mp4 parser
+ * refuses it (`RCHECK(channel_config_ != 0)` in media/formats/mp4/aac.cc), so the whole init segment fails there,
+ * while Firefox plays it: measured 2026-11-05 on Chrome 156 and Firefox 157 (RIPPLE-53).
+ */
+static bool aac_layout_in_pce(const AVCodecParameters* par) {
+  if (par->codec_id != AV_CODEC_ID_AAC || !par->extradata || par->extradata_size < 2) return false;
+  const int size = std::min(par->extradata_size, 8);
+  uint64_t bits = 0;
+  for (int i = 0; i < 8; i++) bits = (bits << 8) | (i < size ? par->extradata[i] : 0);
+  int at = 0;
+  const auto read = [&](int count) {
+    const uint64_t value = (bits >> (64 - at - count)) & ((1ull << count) - 1);
+    at += count;
+    return value;
+  };
+  if (read(5) == 31) read(6);
+  if (read(4) == 15) read(24);
+  return at + 4 <= size * 8 && read(4) == 0;
+}
+
 
 
 typedef struct MediaInfo {
@@ -346,16 +369,16 @@ public:
   static constexpr int OUTPUT_TS_OFFSET_SECONDS = 10;
 
   /** audio reaches the browser untouched only if the muxer can carry it AND the browser can decode it */
-  bool audio_passthrough_ok(AVCodecID codec_id) const {
-    const char* name = audio_passthrough_name(codec_id);
-    return name && browser_audio_codecs.count(name) > 0;
+  bool audio_passthrough_ok(const AVCodecParameters* par) const {
+    const char* name = audio_passthrough_name(par->codec_id);
+    return name && browser_audio_codecs.count(name) > 0 && !aac_layout_in_pce(par);
   }
 
   // Everything else audio, from dts through vorbis, mp3, wma and raw pcm, re-encodes to aac rather than
   // being dropped. Video has no equivalent: re-encoding it is far too expensive to do live.
-  bool needs_transcoding_to_aac(AVCodecID codec_id) const {
-    return !audio_passthrough_ok(codec_id)
-      && avcodec_find_decoder(codec_id) != nullptr
+  bool needs_transcoding_to_aac(const AVCodecParameters* par) const {
+    return !audio_passthrough_ok(par)
+      && avcodec_find_decoder(par->codec_id) != nullptr
       && avcodec_find_encoder(AV_CODEC_ID_AAC) != nullptr;
   }
 
@@ -422,8 +445,8 @@ public:
    * playing at all. Almost nothing reaches this now that everything with a decoder re-encodes to aac; it is
    * the codecs this build carries no decoder for that end up here.
    */
-  bool output_accepts_audio(AVCodecID codec_id) {
-    return audio_passthrough_ok(codec_id) || needs_transcoding_to_aac(codec_id);
+  bool output_accepts_audio(const AVCodecParameters* par) {
+    return audio_passthrough_ok(par) || needs_transcoding_to_aac(par);
   }
 
   std::string parse_mp4a_mime_type(AVCodecParameters* in_codecpar) {
@@ -1014,7 +1037,7 @@ public:
       AVStream* in_stream = input_format_context->streams[i];
       if (in_stream->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) continue;
       if (first_audio < 0) first_audio = i;
-      if (first_usable < 0 && output_accepts_audio(in_stream->codecpar->codec_id)) first_usable = i;
+      if (first_usable < 0 && output_accepts_audio(in_stream->codecpar)) first_usable = i;
       if (i == selected_audio_index) selected_valid = true;
       AudioStream audio_stream;
       audio_stream.streamIndex = i;
@@ -1245,9 +1268,9 @@ public:
       }
 
       if (in_codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-        if (i != effective_audio || !output_accepts_audio(in_codecpar->codec_id)) continue;
+        if (i != effective_audio || !output_accepts_audio(in_codecpar)) continue;
         audio_index = i;
-        if (needs_transcoding_to_aac(in_codecpar->codec_id)) {
+        if (needs_transcoding_to_aac(in_codecpar)) {
           needs_audio_transcoding = true;
           audio_mime_type = "mp4a.40.2"; // describes the AAC-LC output, not the compressed input
         } else {
@@ -1972,7 +1995,7 @@ public:
       packet->stream_index = streams_list[packet->stream_index];
 
       if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-        if (needs_audio_transcoding && needs_transcoding_to_aac(in_stream->codecpar->codec_id)) {
+        if (needs_audio_transcoding && needs_transcoding_to_aac(in_stream->codecpar)) {
           if (transcode_audio(packet, out_stream) < 0) {
             printf("ERROR: could not transcode audio\n");
           }
