@@ -27,23 +27,29 @@ on:
   # for re-running a publish that failed after the version already landed, which a push cannot repeat
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: publish
   cancel-in-progress: false
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # not latest: ubuntu-latest is moving to 26.04, where Playwright 1.58 installed no browsers (2026-11-17)
+    runs-on: ubuntu-24.04
     # the docker build alone is ~10 minutes on a cold runner, and it compiles ffmpeg from source
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       # Node 24, not 19. The repo builds through Vite+, whose `bin/vp` has no file extension, and
       # Node 19 refuses to load an extensionless file inside a "type": "module" package. That is the
       # error every run of the old workflow died on, and it reads as a broken dependency rather than
       # a stale runtime.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: npm
@@ -76,7 +82,7 @@ jobs:
       - run: npm test
 
       - name: Keep the tested artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: build
           path: build
@@ -84,7 +90,7 @@ jobs:
           retention-days: 7
 
       # a failed browser assertion leaves its evidence in the report, not in the log
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
           name: playwright-report
@@ -103,11 +109,13 @@ jobs:
       # the OIDC token npm exchanges for short-lived publish credentials. Without it the job has no
       # way to authenticate at all, because there is deliberately no token secret anywhere.
       id-token: write
-      # only to push the release tag
+      # only to create the release tag
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       # NO registry-url on purpose. That input writes an .npmrc pinning auth to ${NODE_AUTH_TOKEN},
       # which is empty here; npm then believes it is authenticated, skips the OIDC exchange entirely,
@@ -116,18 +124,17 @@ jobs:
       # NO `cache: npm` either: setup-node registers a post-job step that saves the cache, and this
       # job never installs, so that post-step errors and the JOB goes red while every step in it
       # reports success.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           package-manager-cache: false
 
-      # Trusted publishing needs npm >= 11.5.1. Node 24 ships something recent enough today, which is
-      # exactly why this runs rather than being assumed: the day the runner image moves, an unpinned
-      # npm would fail at the publish step with an auth error that looks like a revoked credential
-      # rather than a stale CLI.
+      # Trusted publishing needs npm >= 11.5.1, and a stale CLI fails the publish step with an auth
+      # error that looks like a revoked credential. Exact, so a new npm only arrives by a bump here:
+      # 12.2.2 is what run 42077305020 (2026-11-05) published 0.8.15 with.
       - name: Use an npm that supports trusted publishing
         run: |
-          npm install -g npm@latest
+          npm install -g npm@12.2.2
           echo "npm $(npm --version)"
 
       # Compared against the REGISTRY rather than against the previous commit, which makes this
@@ -171,7 +178,7 @@ jobs:
       # The artifact the tests actually ran against, not a second build that might differ from it.
       - name: Take the tested build
         if: steps.decide.outputs.changed == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: build
           path: build
@@ -231,10 +238,10 @@ jobs:
         if: steps.decide.outputs.changed == 'true'
         run: npm publish --access public --ignore-scripts --loglevel verbose
 
+      # Through the API, so the checkout keeps no write token on disk.
       - name: Tag the release
         if: steps.decide.outputs.changed == 'true'
         env:
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.decide.outputs.local }}
-        run: |
-          git tag "v$VERSION"
-          git push origin "v$VERSION"
+        run: gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v$VERSION" -f sha="$GITHUB_SHA"
