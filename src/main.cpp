@@ -244,7 +244,6 @@ public:
 
   int64_t last_video_dts = AV_NOPTS_VALUE;
   int64_t last_audio_dts = AV_NOPTS_VALUE;
-  bool after_seek = false;
 
   int64_t currentOffset = 0;
   int64_t input_length = 0;
@@ -371,6 +370,8 @@ public:
   std::set<std::string> browser_audio_codecs;
   /** set between write_header and the delayed moov reaching avio_write */
   bool header_pending = false;
+  /** set by seek() with delay_moov so its rebuilt init segment is dropped, matching non-delayed seeks */
+  bool drop_pending_header = false;
 
   /**
    * Every timestamp written is content time plus this, so nothing is negative: a B-frame stream's first decode times
@@ -1112,6 +1113,10 @@ public:
   void init_output() {
     // a fresh output context has not been finalized, whatever the previous one had done
     output_finalized = false;
+    header_pending = false;
+    drop_pending_header = false;
+    last_video_dts = AV_NOPTS_VALUE;
+    last_audio_dts = AV_NOPTS_VALUE;
     uint8_t* output_avio_buffer = (uint8_t*)av_malloc(buffer_size);
     // args after the buffer size: 1 = write flag, this = opaque, nullptr = no read, avio_write = custom write, nullptr = no seek
     output_avio_context = avio_alloc_context(
@@ -2077,10 +2082,8 @@ public:
         } else {
           av_packet_rescale_ts(packet, in_stream->time_base, out_stream->time_base);
 
-          if (after_seek && packet->dts != AV_NOPTS_VALUE) {
-            if (last_audio_dts == AV_NOPTS_VALUE) {
-              last_audio_dts = packet->dts;
-            } else if (packet->dts < last_audio_dts) {
+          if (packet->dts != AV_NOPTS_VALUE) {
+            if (last_audio_dts != AV_NOPTS_VALUE && packet->dts <= last_audio_dts) {
               // the mp4 muxer rejects non-monotonic dts, so force it forward and clamp pts up to match
               packet->dts = last_audio_dts + 1;
               if (packet->pts != AV_NOPTS_VALUE && packet->pts < packet->dts) {
@@ -2111,10 +2114,8 @@ public:
       duration += packet_seconds;
       av_packet_rescale_ts(packet, in_stream->time_base, out_stream->time_base);
 
-      if (after_seek && packet->dts != AV_NOPTS_VALUE) {
-        if (last_video_dts == AV_NOPTS_VALUE) {
-          last_video_dts = packet->dts;
-        } else if (packet->dts <= last_video_dts) {
+      if (packet->dts != AV_NOPTS_VALUE) {
+        if (last_video_dts != AV_NOPTS_VALUE && packet->dts <= last_video_dts) {
           packet->dts = last_video_dts + 1;
           if (packet->pts != AV_NOPTS_VALUE && packet->pts < packet->dts) {
             packet->pts = packet->dts;
@@ -2137,10 +2138,6 @@ public:
 
         pts = packet->pts * av_q2d(out_stream->time_base);
         pos = packet->pos;
-
-        if (after_seek) {
-          after_seek = false;
-        }
       }
 
       /*
@@ -2280,6 +2277,9 @@ public:
     write_header();
     initializing = false;
     write_vector.clear();
+    // With delay_moov, write_header() emitted nothing yet; drop its delayed ftyp+moov on the first write
+    // so seek() emits media segments only, matching every other codec.
+    drop_pending_header = header_pending;
     subtitles.clear();
     wrote = false;
 
@@ -2287,10 +2287,6 @@ public:
     // there is no carried-over audio left to drain; only the clock has to be seeded again from the first
     // packet at the new position
     audio_pts_initialized = false;
-
-    last_video_dts = AV_NOPTS_VALUE;
-    last_audio_dts = AV_NOPTS_VALUE;
-    after_seek = true;
 
     // the seconds-to-time_base conversion was previously a bare millisecond value, correct only for matroska
     AVStream* video_stream = input_format_context->streams[video_stream_index];
@@ -2444,6 +2440,10 @@ private:
      */
     if (self->header_pending) {
       self->header_pending = false;
+      if (self->drop_pending_header) {
+        self->drop_pending_header = false;
+        return buf_size;
+      }
     } else {
       self->wrote = true;
     }

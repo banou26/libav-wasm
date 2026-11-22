@@ -183,6 +183,47 @@ test.describe('remuxing', () => {
     }
   })
 
+  // Safari accepts ac-3 and ec-3 passthrough, which requires delay_moov. On seek(), write_header() had not
+  // written its ftyp+moov yet when write_vector.clear() ran, so every seek prepended a second init segment
+  // before moof+mdat. Mid-stream init segments re-initialize Safari's CoreMedia audio renderer.
+  test('seeking with delayed moov (ac3 and eac3 passthrough) emits media segments only', async ({ page }) => {
+    await open(page)
+    for (const [fixture, codecs] of [
+      ['h264-ac3.mkv', ['aac', 'ac3']],
+      ['h264-eac3.mkv', ['aac', 'eac3']],
+    ]) {
+      const result = await page.evaluate(
+        ([name, audioCodecs]) => window.harness.seek(name, [12, 4], { audioCodecs }),
+        [fixture, codecs],
+      )
+      expect(result.initBoxes, `${fixture} init must carry moov`).toContain('moov')
+      for (const step of result.steps) {
+        expect(step.bytes, `${fixture} seek(${step.target}) produced no media bytes`).toBeGreaterThan(0)
+        expect(step.boxes, `${fixture} seek(${step.target}) must not re-emit ftyp`).not.toContain('ftyp')
+        expect(step.boxes, `${fixture} seek(${step.target}) must not re-emit moov`).not.toContain('moov')
+        expect(step.boxes[0], `${fixture} seek(${step.target}) must open on moof`).toBe('moof')
+      }
+    }
+  })
+
+  // Equal audio packet DTS values bypassed `<` (only catching strictly decreasing DTS) and the post-seek
+  // guard turned off on the very first video keyframe, so lavf mux.c rejected audio frames with EINVAL.
+  test('duplicate audio DTS packets after a keyframe or seek are clamped forward instead of dropped', async ({ page }) => {
+    await open(page)
+    for (const target of [undefined, 2]) {
+      const result = await page.evaluate(
+        ([name, seekTarget]) => window.harness.duplicateAudioDts(name, { target: seekTarget }),
+        ['h264-aac.mkv', target],
+      )
+      expect(result.patched.audioCount, `target=${target}: audio packets were dropped`).toBe(result.baseline.audioCount)
+      expect(result.patched.audioCount).toBeGreaterThan(50)
+      expect(result.patched.nonMonotonicDts, `target=${target}: non-monotonic audio DTS`).toBe(0)
+      expect(result.patched.zeroDuration, `target=${target}: zero-duration audio sample`).toBe(0)
+      expect(typeof result.patched.buffered, `target=${target}: MSE rejected bytes: ${JSON.stringify(result.patched.buffered)}`).toBe('number')
+      expect(result.patched.buffered).toBeGreaterThan(0)
+    }
+  })
+
   /**
    * Chrome's mp4 parser refuses an aac channelConfiguration of 0 (the layout named in a program config element) or of
    * 8 and up, and with it the whole init segment, where Firefox plays both. The same 5.1 named by number is the

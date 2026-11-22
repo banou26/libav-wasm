@@ -38,10 +38,25 @@ const centrePixel = async (png) => {
   return { r: data[0], g: data[1], b: data[2], ...size }
 }
 
+/** Top-level ISO BMFF fourcc types in order (at most `limit`). */
+const topBoxes = (buffer, limit = 8) => {
+  if (!buffer?.byteLength) return []
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer)
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const found = []
+  for (let at = 0; at + 8 <= view.byteLength && found.length < limit;) {
+    const size = view.getUint32(at)
+    found.push(String.fromCharCode(...bytes.subarray(at + 4, at + 8)))
+    if (size <= 0) break
+    at += size
+  }
+  return found
+}
+
 /**
  * Reads fragmented mp4 into `state`: each track's timescale and kind from a moov, how many edit lists it carries, and,
  * when `collect` is set, every sample's presentation time in seconds as the bytes write it, per kind in decode order,
- * and the last 8 bytes of the first audio sample, as hex.
+ * the last 8 bytes of the first audio sample as hex, and (when present on `state`) raw audio DTS and durations.
  */
 const readMp4 = (state, buffer, collect) => {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer)
@@ -98,6 +113,10 @@ const readMp4 = (state, buffer, collect) => {
           if (flags & 0x800) { composition = signed ? view.getInt32(at) : view.getUint32(at); at += 4 }
           const pts = (dts + composition) / track.timescale
           state.samples[track.kind].push(pts)
+          if (track.kind === 'audio') {
+            state.audioDts?.push(dts)
+            state.audioDurations?.push(duration)
+          }
           fragment?.push(pts)
           if (track.kind === 'audio' && state.audioStart === undefined) {
             state.audioStart = [...bytes.subarray(data + size - 8, data + size)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
@@ -163,18 +182,7 @@ window.harness = {
         indexCount: init.indexes.length,
         subtitleCount: init.subtitles.length,
         // the first four bytes of each top level box's type, so a test can tell an init segment from media
-        initBoxes: (() => {
-          const bytes = init.data instanceof Uint8Array ? init.data : new Uint8Array(init.data)
-          const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-          const found = []
-          for (let at = 0; at + 8 <= view.byteLength && found.length < 8;) {
-            const size = view.getUint32(at)
-            found.push(String.fromCharCode(...bytes.subarray(at + 4, at + 8)))
-            if (size <= 0) break
-            at += size
-          }
-          return found
-        })(),
+        initBoxes: topBoxes(init.data),
         segments,
       }
     } finally { await remuxer.destroy() }
@@ -285,7 +293,7 @@ window.harness = {
       ...(audioCodecs ? { audioCodecs } : {}),
     })
     try {
-      await remuxer.init()
+      const init = await remuxer.init()
       const steps = []
       for (const target of targets) {
         offsets = []
@@ -299,10 +307,10 @@ window.harness = {
         }
         steps.push({
           target, pts: chunk.pts, duration: chunk.duration,
-          bytes: chunk.data?.byteLength ?? 0, after, offsets: offsets.slice(),
+          bytes: chunk.data?.byteLength ?? 0, boxes: topBoxes(chunk.data), after, offsets: offsets.slice(),
         })
       }
-      return { steps, length }
+      return { initBoxes: topBoxes(init.data), steps, length }
     } finally { await remuxer.destroy() }
   },
 
@@ -337,6 +345,143 @@ window.harness = {
       held.forEach((release) => release())
       return { cancelled, finished, error }
     } finally { await remuxer.destroy() }
+  },
+
+  /**
+   * Patches two consecutive audio SimpleBlocks right after the video keyframe in Cluster 1 of a Matroska
+   * fixture to share the exact same relative timecode, then compares baseline vs patched remux output
+   * (from load or after a seek) and verifies MediaSource accepts the patched stream.
+   */
+  async duplicateAudioDts(name, { target, reads = 4 } = {}) {
+    const res = await fetch(`/media?name=${encodeURIComponent(name)}`)
+    const original = new Uint8Array(await res.arrayBuffer())
+    const patched = original.slice()
+
+    // Locate the second Matroska Cluster (0x1F 0x43 0xB6 0x75) and duplicate the second audio SimpleBlock's
+    // signed 16-bit relative timecode right after the cluster's video keyframe.
+    const readVint = (buf, at) => {
+      const first = buf[at]
+      let len = 1
+      while (len <= 8 && !(first & (0x80 >> (len - 1)))) len++
+      let val = first & (0xff >> len)
+      for (let i = 1; i < len; i++) val = val * 256 + buf[at + i]
+      return { val, len }
+    }
+    const clusters = []
+    for (let i = 0; i + 4 < patched.length; i++) {
+      if (patched[i] === 0x1f && patched[i + 1] === 0x43 && patched[i + 2] === 0xb6 && patched[i + 3] === 0x75) {
+        clusters.push(i)
+      }
+    }
+    if (clusters.length < 2) throw new Error(`expected at least 2 clusters in ${name}`)
+    let at = clusters[1] + 4
+    const clusterSize = readVint(patched, at)
+    at += clusterSize.len
+    const clusterEnd = at + clusterSize.val
+    let sawVideoKey = false
+    let prevAudioTc = null
+    let patchedAt = -1
+    while (at < clusterEnd) {
+      const idByte = patched[at]
+      let idLen = 1
+      while (idLen <= 4 && !(idByte & (0x80 >> (idLen - 1)))) idLen++
+      const isSimpleBlock = idLen === 1 && idByte === 0xa3
+      // Turn any Cluster CRC-32 (0xBF) into EBML Void (0xEC) so patching a block keeps byte offsets valid
+      if (idLen === 1 && idByte === 0xbf) patched[at] = 0xec
+      at += idLen
+      const sz = readVint(patched, at)
+      const blockStart = at + sz.len
+      if (isSimpleBlock) {
+        const track = readVint(patched, blockStart)
+        const tcOffset = blockStart + track.len
+        const flags = patched[tcOffset + 2]
+        if (track.val === 1 && (flags & 0x80)) {
+          sawVideoKey = true
+        } else if (track.val === 2 && sawVideoKey) {
+          if (prevAudioTc === null) {
+            prevAudioTc = [patched[tcOffset], patched[tcOffset + 1]]
+          } else {
+            patched[tcOffset] = prevAudioTc[0]
+            patched[tcOffset + 1] = prevAudioTc[1]
+            patchedAt = tcOffset
+            break
+          }
+        }
+      }
+      at = blockStart + sz.val
+    }
+    if (patchedAt < 0) throw new Error(`failed to locate two post-keyframe audio blocks in ${name}`)
+
+    const run = async (bytes, verifyMse) => {
+      const read = async (offset, size) => bytes.slice(offset, offset + size).buffer
+      const remuxer = await makeRemuxer(common(bytes.byteLength, read))
+      try {
+        const init = await remuxer.init()
+        const state = {
+          tracks: new Map(), defaults: new Map(), editLists: 0,
+          samples: { video: [], audio: [] }, videoFragments: [],
+          audioDts: [], audioDurations: [],
+        }
+        const chunks = []
+        readMp4(state, init.data, target === undefined)
+        if (target !== undefined) {
+          const sought = await remuxer.seek(target)
+          if (sought.data?.byteLength) {
+            chunks.push(sought.data)
+            readMp4(state, sought.data, true)
+          }
+        }
+        for (let i = 0; i < reads; i++) {
+          const chunk = await remuxer.read()
+          if (chunk.data?.byteLength) {
+            chunks.push(chunk.data)
+            readMp4(state, chunk.data, true)
+          }
+          if (chunk.finished) break
+        }
+        let nonMonotonicDts = 0
+        for (let i = 1; i < state.audioDts.length; i++) {
+          if (state.audioDts[i] <= state.audioDts[i - 1]) nonMonotonicDts++
+        }
+        const zeroDuration = state.audioDurations.filter((d) => d <= 0).length
+        let buffered = null
+        if (verifyMse) {
+          const codecs = [init.info.output.videoMimeType, init.info.output.audioMimeType].filter(Boolean).join(',')
+          const mime = `video/mp4; codecs="${codecs}"`
+          buffered = await new Promise((resolve) => {
+            const source = new MediaSource()
+            const video = document.createElement('video')
+            video.src = URL.createObjectURL(source)
+            source.addEventListener('sourceopen', async () => {
+              try {
+                const buffer = source.addSourceBuffer(mime)
+                const push = (data) => new Promise((done, fail) => {
+                  buffer.addEventListener('updateend', done, { once: true })
+                  buffer.addEventListener('error', () => fail(new Error('appendBuffer failed')), { once: true })
+                  buffer.appendBuffer(data)
+                })
+                await push(init.data)
+                for (const chunk of chunks) await push(chunk)
+                resolve(buffer.buffered.length ? buffer.buffered.end(buffer.buffered.length - 1) : 0)
+              } catch (error) { resolve({ error: String(error).slice(0, 200) }) }
+            }, { once: true })
+            setTimeout(() => resolve({ error: 'timed out waiting for sourceopen' }), 20_000)
+          })
+        }
+        return {
+          audioCount: state.audioDts.length,
+          nonMonotonicDts,
+          zeroDuration,
+          buffered,
+        }
+      } finally { await remuxer.destroy() }
+    }
+
+    return {
+      patchedAt,
+      baseline: await run(original, false),
+      patched: await run(patched, true),
+    }
   },
 
   async indexes(name) {
