@@ -311,6 +311,8 @@ public:
   double pending_video_pts = 0;
   int64_t pending_video_pos = 0;
   double pending_video_seconds = 0;
+  AVRational pending_video_time_base = { 0, 1 };
+  AVPacket* pending_audio = nullptr;
 
   /**
    * How far past a seek target fragments are cut on LENGTH rather than on keyframes, in seconds.
@@ -1128,6 +1130,7 @@ public:
 
   void destroy_output() {
     av_packet_free(&pending_video);
+    av_packet_free(&pending_audio);
     if (output_avio_context) {
       av_free(output_avio_context->buffer);
       output_avio_context->buffer = nullptr;
@@ -1514,9 +1517,11 @@ public:
     frag_seconds = 0;
     frag_max_pts = AV_NOPTS_VALUE;
     av_packet_free(&pending_video);
+    av_packet_free(&pending_audio);
     pending_video_pts = 0;
     pending_video_pos = 0;
     pending_video_seconds = 0;
+    pending_video_time_base = { 0, 1 };
     frag_closed = false;
     closed_pts = 0;
     closed_pos = 0;
@@ -1917,12 +1922,28 @@ public:
     return result;
   }
 
+  int flush_pending_audio(int64_t next_dts) {
+    if (!pending_audio) return 0;
+    if (
+      next_dts != AV_NOPTS_VALUE &&
+      pending_audio->dts != AV_NOPTS_VALUE &&
+      next_dts > pending_audio->dts &&
+      (uint64_t)next_dts - (uint64_t)pending_audio->dts <= (uint64_t)INT_MAX
+    ) {
+      pending_audio->duration = next_dts - pending_audio->dts;
+    }
+    int ret = av_interleaved_write_frame(output_format_context, pending_audio);
+    av_packet_free(&pending_audio);
+    return ret;
+  }
+
   int flush_pending_video(int64_t next_dts) {
     if (!pending_video) return 0;
     if (
       next_dts != AV_NOPTS_VALUE &&
       pending_video->dts != AV_NOPTS_VALUE &&
-      next_dts > pending_video->dts
+      next_dts > pending_video->dts &&
+      (uint64_t)next_dts - (uint64_t)pending_video->dts <= (uint64_t)INT_MAX
     ) {
       pending_video->duration = next_dts - pending_video->dts;
     }
@@ -1933,7 +1954,11 @@ public:
       frag_seconds = 0;
       frag_max_pts = AV_NOPTS_VALUE;
     }
-    frag_seconds += pending_video_seconds;
+    const double step_seconds =
+      pending_video->duration > 0 && pending_video_time_base.den > 0
+        ? pending_video->duration * av_q2d(pending_video_time_base)
+        : pending_video_seconds;
+    frag_seconds += step_seconds;
     if (
       pending_video->pts != AV_NOPTS_VALUE &&
       (frag_max_pts == AV_NOPTS_VALUE || pending_video->pts > frag_max_pts)
@@ -1975,6 +2000,9 @@ public:
           // ends by calling read(), so a seek that lands at the end finalizes the muxer, and a read
           // that follows finalizes it again.
           if (!output_finalized) {
+            if (flush_pending_audio(AV_NOPTS_VALUE) < 0) {
+              printf("Error writing final audio frame\n");
+            }
             if (flush_pending_video(AV_NOPTS_VALUE) < 0) {
               printf("Error writing final video frame\n");
             }
@@ -2062,9 +2090,12 @@ public:
             last_audio_dts = packet->dts;
           }
 
-          if ((ret = av_interleaved_write_frame(output_format_context, packet)) < 0) {
+          if ((ret = flush_pending_audio(packet->dts)) < 0) {
             printf("ERROR: could not write interleaved frame | %s \n", av_err2str(ret));
           }
+          pending_audio = packet;
+          packet = nullptr;
+          continue;
         }
         av_packet_unref(packet);
         av_packet_free(&packet);
@@ -2156,7 +2187,9 @@ public:
         closed_pos = frag_pos;
         closed_seconds = frag_seconds;
         frag_closed = true;
-        av_interleaved_write_frame(output_format_context, nullptr);
+        if ((ret = av_interleaved_write_frame(output_format_context, nullptr)) < 0) {
+          printf("Error flushing interleave queue: %s\n", ffmpegErrStr(ret).c_str());
+        }
         // flushes the fragment, which drives avio_write and sets wrote
         av_write_frame(output_format_context, nullptr);
         frag_open = false;
@@ -2167,6 +2200,7 @@ public:
       pending_video_pts = packet_pts_seconds;
       pending_video_pos = packet_pos;
       pending_video_seconds = packet_seconds;
+      pending_video_time_base = out_stream->time_base;
       packet = nullptr;
 
       if (wrote) {

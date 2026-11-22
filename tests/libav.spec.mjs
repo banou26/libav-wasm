@@ -498,7 +498,7 @@ const expectOwnTimes = (label, written, source, startsAt) => {
     if (startsAt(source[i]) && (at < 0 || Math.abs(source[i].time - written[0]) < Math.abs(source[at].time - written[0]))) at = i
   }
   expect(at, `${label}: the packet it starts from`).toBeGreaterThanOrEqual(0)
-  const wrong = written.findIndex((time, i) => !(Math.abs(time - source[at + i]?.time) < 0.001))
+  const wrong = written.findIndex((time, i) => !(Math.abs(time - source[at + i]?.time) < 0.0005))
   expect(wrong, `${label}: sample ${wrong} at ${written[wrong]}, its packet at ${source[at + wrong]?.time}`).toBe(-1)
 }
 
@@ -541,10 +541,11 @@ test.describe('the timeline', () => {
   test('short seek fragments in a B-frame stream do not overlap in presentation time or drift at boundaries', async ({ page }) => {
     await open(page)
     const source = await sourcePackets('h264-bframes-aac.mkv')
-    for (const { label, target, audioCodecs } of [
-      { label: 'passthrough audio, first GOP', target: 0 },
-      { label: 'passthrough audio, second GOP', target: 12 },
-      { label: 'transcoded audio, second GOP', target: 12, audioCodecs: [] },
+    for (const { label, target, audioCodecs, passthrough } of [
+      { label: 'passthrough audio, first GOP', target: 0, passthrough: true },
+      { label: 'passthrough audio, second GOP', target: 12, passthrough: true },
+      { label: 'transcoded audio, first GOP', target: 0, audioCodecs: [], passthrough: false },
+      { label: 'transcoded audio, second GOP', target: 12, audioCodecs: [], passthrough: false },
     ]) {
       const written = await page.evaluate(
         ([name, options]) => window.harness.timeline(name, options),
@@ -556,8 +557,15 @@ test.describe('the timeline', () => {
         const nextMin = Math.min(...written.videoFragments[i])
         expect(nextMin, `${label}: fragment ${i} opens at ${nextMin} <= previous max ${prevMax}`).toBeGreaterThan(prevMax)
       }
-      expectOwnTimes(`h264-bframes-aac.mkv (${label})`, written.video, source.video, ({ key }) => key)
+      expectOwnTimes(`h264-bframes-aac.mkv video (${label})`, written.video, source.video, ({ key }) => key)
+      if (passthrough) {
+        expectOwnTimes(`h264-bframes-aac.mkv audio (${label})`, written.audio, source.audio, ({ tail }) => tail === written.audioStart)
+      }
     }
+    const baseline = await sourcePackets('h264-aac.mkv')
+    const loaded = await page.evaluate(() => window.harness.timeline('h264-aac.mkv', { reads: 10 }))
+    expectOwnTimes('h264-aac.mkv video at load', loaded.video, baseline.video, ({ key }) => key)
+    expectOwnTimes('h264-aac.mkv audio at load', loaded.audio, baseline.audio, ({ tail }) => tail === loaded.audioStart)
   })
 })
 
