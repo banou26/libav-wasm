@@ -306,6 +306,11 @@ public:
   double frag_pts = 0;
   int64_t frag_pos = 0;
   double frag_seconds = 0;
+  int64_t frag_max_pts = AV_NOPTS_VALUE;
+  AVPacket* pending_video = nullptr;
+  double pending_video_pts = 0;
+  int64_t pending_video_pos = 0;
+  double pending_video_seconds = 0;
 
   /**
    * How far past a seek target fragments are cut on LENGTH rather than on keyframes, in seconds.
@@ -1122,6 +1127,7 @@ public:
   }
 
   void destroy_output() {
+    av_packet_free(&pending_video);
     if (output_avio_context) {
       av_free(output_avio_context->buffer);
       output_avio_context->buffer = nullptr;
@@ -1506,6 +1512,11 @@ public:
     frag_pts = 0;
     frag_pos = 0;
     frag_seconds = 0;
+    frag_max_pts = AV_NOPTS_VALUE;
+    av_packet_free(&pending_video);
+    pending_video_pts = 0;
+    pending_video_pos = 0;
+    pending_video_seconds = 0;
     frag_closed = false;
     closed_pts = 0;
     closed_pos = 0;
@@ -1906,6 +1917,34 @@ public:
     return result;
   }
 
+  int flush_pending_video(int64_t next_dts) {
+    if (!pending_video) return 0;
+    if (
+      next_dts != AV_NOPTS_VALUE &&
+      pending_video->dts != AV_NOPTS_VALUE &&
+      next_dts > pending_video->dts
+    ) {
+      pending_video->duration = next_dts - pending_video->dts;
+    }
+    if (!frag_open) {
+      frag_open = true;
+      frag_pts = pending_video_pts;
+      frag_pos = pending_video_pos;
+      frag_seconds = 0;
+      frag_max_pts = AV_NOPTS_VALUE;
+    }
+    frag_seconds += pending_video_seconds;
+    if (
+      pending_video->pts != AV_NOPTS_VALUE &&
+      (frag_max_pts == AV_NOPTS_VALUE || pending_video->pts > frag_max_pts)
+    ) {
+      frag_max_pts = pending_video->pts;
+    }
+    int ret = av_interleaved_write_frame(output_format_context, pending_video);
+    av_packet_free(&pending_video);
+    return ret;
+  }
+
   ReadResult read(emscripten::val read_function) {
     resolved_promise.await();
 
@@ -1928,7 +1967,6 @@ public:
           return cancelled_result;
         }
         if (ret == AVERROR_EOF) {
-          avio_flush(output_format_context->pb);
           // Once, and only once. av_write_trailer frees and NULLs s->priv_data on its way out
           // (lavf mux.c), so a second call reaches movenc with a null MOVMuxContext and dereferences
           // it. Under emcc without SAFE_HEAP that reads as zeros rather than trapping, which clears
@@ -1937,6 +1975,10 @@ public:
           // ends by calling read(), so a seek that lands at the end finalizes the muxer, and a read
           // that follows finalizes it again.
           if (!output_finalized) {
+            if (flush_pending_video(AV_NOPTS_VALUE) < 0) {
+              printf("Error writing final video frame\n");
+            }
+            avio_flush(output_format_context->pb);
             av_write_trailer(output_format_context);
             output_finalized = true;
           }
@@ -2082,38 +2124,50 @@ public:
        * and length, but only while serving a seek. See SEEK_FRAGMENT_WINDOW for why length cutting is
        * not worth doing the rest of the time.
        */
+      ret = flush_pending_video(packet->dts);
+      if (ret < 0) {
+        printf("Error writing frame: %s\n", ffmpegErrStr(ret).c_str());
+        av_packet_free(&packet);
+        break;
+      }
+
       const double packet_pts_seconds = packet->pts * av_q2d(out_stream->time_base);
       const bool cutting_on_length =
         cut_on_length_until >= 0 && packet_pts_seconds < cut_on_length_until;
+      /*
+       * A length cut cannot split a B-frame reorder group: if the next fragment opens with a frame
+       * presented before one the previous fragment already closed over, their presentation ranges
+       * overlap and Firefox MSE evicts the earlier frame, leaving its slot showing a neighbour.
+       * Waiting for a packet whose pts passes every pts already in the open fragment finishes the
+       * reorder group first, holding one video packet gives the last packet of a fragment its exact
+       * dts duration instead of the container's truncated packet->duration, and draining the
+       * interleave queue before flushing keeps trailing frames out of the next fragment when audio
+       * lags video.
+       */
+      const bool past_reorder =
+        frag_max_pts == AV_NOPTS_VALUE ||
+        (packet->pts != AV_NOPTS_VALUE && packet->pts > frag_max_pts);
       const bool close_now =
         frag_open && frag_seconds > 0 &&
-        (is_keyframe || (cutting_on_length && frag_seconds >= FRAGMENT_SECONDS));
+        (is_keyframe || (cutting_on_length && frag_seconds >= FRAGMENT_SECONDS && past_reorder));
 
       if (close_now) {
         closed_pts = frag_pts;
         closed_pos = frag_pos;
         closed_seconds = frag_seconds;
         frag_closed = true;
+        av_interleaved_write_frame(output_format_context, nullptr);
         // flushes the fragment, which drives avio_write and sets wrote
         av_write_frame(output_format_context, nullptr);
         frag_open = false;
+        frag_max_pts = AV_NOPTS_VALUE;
       }
 
-      if (!frag_open) {
-        frag_open = true;
-        frag_pts = packet_pts_seconds;
-        frag_pos = packet_pos;
-        frag_seconds = 0;
-      }
-      frag_seconds += packet_seconds;
-
-      ret = av_interleaved_write_frame(output_format_context, packet);
-      if (ret < 0) {
-        printf("Error writing frame: %s\n", ffmpegErrStr(ret).c_str());
-        break;
-      }
-
-      av_packet_free(&packet);
+      pending_video = packet;
+      pending_video_pts = packet_pts_seconds;
+      pending_video_pos = packet_pos;
+      pending_video_seconds = packet_seconds;
+      packet = nullptr;
 
       if (wrote) {
         wrote = false;

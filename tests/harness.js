@@ -84,6 +84,7 @@ const readMp4 = (state, buffer, collect) => {
       if (tfhdFlags & 0x08) at += 4
       const defaultSize = tfhdFlags & 0x10 ? view.getUint32(at) : state.defaults.get(id).size
       let dts = bytes[tfdt.start] ? Number(view.getBigUint64(tfdt.start + 4)) : view.getUint32(tfdt.start + 4)
+      const fragment = track.kind === 'video' ? [] : null
       for (const trun of children(traf.start, traf.end).filter((b) => b.type === 'trun')) {
         const flags = flagsOf(trun), signed = bytes[trun.start] === 1, count = view.getUint32(trun.start + 4)
         // default-base-is-moof: a run's data offset counts from the first byte of its moof
@@ -95,7 +96,9 @@ const readMp4 = (state, buffer, collect) => {
           if (flags & 0x200) { size = view.getUint32(at); at += 4 }
           if (flags & 0x400) at += 4
           if (flags & 0x800) { composition = signed ? view.getInt32(at) : view.getUint32(at); at += 4 }
-          state.samples[track.kind].push((dts + composition) / track.timescale)
+          const pts = (dts + composition) / track.timescale
+          state.samples[track.kind].push(pts)
+          fragment?.push(pts)
           if (track.kind === 'audio' && state.audioStart === undefined) {
             state.audioStart = [...bytes.subarray(data + size - 8, data + size)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
           }
@@ -103,6 +106,7 @@ const readMp4 = (state, buffer, collect) => {
           dts += duration
         }
       }
+      if (fragment?.length) state.videoFragments.push(fragment)
     }
   }
 }
@@ -117,7 +121,7 @@ window.harness = {
     const remuxer = await makeRemuxer({ ...common(length, read), ...(audioCodecs ? { audioCodecs } : {}) })
     try {
       const init = await remuxer.init()
-      const state = { tracks: new Map(), defaults: new Map(), editLists: 0, samples: { video: [], audio: [] } }
+      const state = { tracks: new Map(), defaults: new Map(), editLists: 0, samples: { video: [], audio: [] }, videoFragments: [] }
       readMp4(state, init.data, target === undefined)
       if (target !== undefined) readMp4(state, (await remuxer.seek(target)).data, true)
       for (let i = 0; i < reads; i++) {
@@ -130,6 +134,7 @@ window.harness = {
         timestampOffset: init.timestampOffset,
         editLists: state.editLists,
         video: state.samples.video.map((time) => time + offset),
+        videoFragments: state.videoFragments.map((fragment) => fragment.map((time) => time + offset)),
         audio: state.samples.audio.map((time) => time + offset),
         audioStart: state.audioStart,
       }

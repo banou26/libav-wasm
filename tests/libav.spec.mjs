@@ -531,6 +531,34 @@ test.describe('the timeline', () => {
       }
     })
   }
+
+  /**
+   * Length-cut fragments after a seek must not split a B-frame reorder group across two moofs, nor shift the first
+   * sample of a fragment onto the container's truncated packet duration. Splitting a reorder group makes a fragment
+   * open with a B-frame whose presentation time sits before a frame the previous fragment closed over, so Firefox MSE
+   * evicts that frame and repeats its neighbour.
+   */
+  test('short seek fragments in a B-frame stream do not overlap in presentation time or drift at boundaries', async ({ page }) => {
+    await open(page)
+    const source = await sourcePackets('h264-bframes-aac.mkv')
+    for (const { label, target, audioCodecs } of [
+      { label: 'passthrough audio, first GOP', target: 0 },
+      { label: 'passthrough audio, second GOP', target: 12 },
+      { label: 'transcoded audio, second GOP', target: 12, audioCodecs: [] },
+    ]) {
+      const written = await page.evaluate(
+        ([name, options]) => window.harness.timeline(name, options),
+        ['h264-bframes-aac.mkv', { target, reads: 10, audioCodecs }],
+      )
+      expect(written.videoFragments.length, `${label}: expected length-cut fragments`).toBeGreaterThanOrEqual(6)
+      for (let i = 1; i < written.videoFragments.length; i++) {
+        const prevMax = Math.max(...written.videoFragments[i - 1])
+        const nextMin = Math.min(...written.videoFragments[i])
+        expect(nextMin, `${label}: fragment ${i} opens at ${nextMin} <= previous max ${prevMax}`).toBeGreaterThan(prevMax)
+      }
+      expectOwnTimes(`h264-bframes-aac.mkv (${label})`, written.video, source.video, ({ key }) => key)
+    }
+  })
 })
 
 test.describe('thumbnails', () => {
