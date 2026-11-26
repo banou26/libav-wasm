@@ -53,6 +53,42 @@ const topBoxes = (buffer, limit = 8) => {
   return found
 }
 
+/** Validate that `buffer` is an exact sequence of top-level ISO BMFF boxes with no trailing or truncated bytes. */
+const parseTopBoxes = (buffer) => {
+  if (!buffer?.byteLength) return { boxes: [], headerBytes: 0, valid: false }
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer)
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const boxes = []
+  let headerBytes = 0
+  let at = 0
+  while (at < view.byteLength) {
+    if (at + 8 > view.byteLength) return { boxes, headerBytes, valid: false }
+    const size32 = view.getUint32(at)
+    let headerLen = 8
+    let size = size32
+    if (size32 === 1) {
+      if (at + 16 > view.byteLength) return { boxes, headerBytes, valid: false }
+      const big = view.getBigUint64(at + 8)
+      if (big > BigInt(Number.MAX_SAFE_INTEGER)) return { boxes, headerBytes, valid: false }
+      size = Number(big)
+      headerLen = 16
+    }
+    if (size < headerLen || at + size > view.byteLength) return { boxes, headerBytes, valid: false }
+    const type = String.fromCharCode(...bytes.subarray(at + 4, at + 8))
+    if (!/^[\x20-\x7e]{4}$/.test(type)) return { boxes, headerBytes, valid: false }
+    boxes.push(type)
+    if (type === 'ftyp' || type === 'moov') headerBytes += size
+    at += size
+  }
+  return { boxes, headerBytes, valid: at === view.byteLength }
+}
+
+const hexSha256 = async (buffer) => {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer)
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
 /**
  * Reads fragmented mp4 into `state`: each track's timescale and kind from a moov, how many edit lists it carries, and,
  * when `collect` is set, every sample's presentation time in seconds as the bytes write it, per kind in decode order,
@@ -294,6 +330,7 @@ window.harness = {
     })
     try {
       const init = await remuxer.init()
+      const initParsed = parseTopBoxes(init.data)
       const steps = []
       for (const target of targets) {
         offsets = []
@@ -305,12 +342,23 @@ window.harness = {
           if (!next?.data?.byteLength) break
           after.push({ pts: next.pts, duration: next.duration })
         }
+        const parsed = parseTopBoxes(chunk.data)
+        const sha256 = chunk.data?.byteLength ? await hexSha256(chunk.data) : null
         steps.push({
           target, pts: chunk.pts, duration: chunk.duration,
-          bytes: chunk.data?.byteLength ?? 0, boxes: topBoxes(chunk.data), after, offsets: offsets.slice(),
+          bytes: chunk.data?.byteLength ?? 0, boxes: topBoxes(chunk.data),
+          validBoxes: parsed.valid, sha256,
+          after, offsets: offsets.slice(),
         })
       }
-      return { initBoxes: topBoxes(init.data), steps, length }
+      return {
+        initBoxes: topBoxes(init.data),
+        initBytes: init.data?.byteLength ?? 0,
+        initHeaderBytes: initParsed.headerBytes,
+        initValidBoxes: initParsed.valid,
+        steps,
+        length,
+      }
     } finally { await remuxer.destroy() }
   },
 
@@ -423,9 +471,16 @@ window.harness = {
           audioDts: [], audioDurations: [],
         }
         const chunks = []
+        let clampedAudioDts = 0
+        let clampedVideoDts = 0
+        const recordClamps = (chunk) => {
+          clampedAudioDts += chunk.clampedAudioDts ?? 0
+          clampedVideoDts += chunk.clampedVideoDts ?? 0
+        }
         readMp4(state, init.data, target === undefined)
         if (target !== undefined) {
           const sought = await remuxer.seek(target)
+          recordClamps(sought)
           if (sought.data?.byteLength) {
             chunks.push(sought.data)
             readMp4(state, sought.data, true)
@@ -433,6 +488,7 @@ window.harness = {
         }
         for (let i = 0; i < reads; i++) {
           const chunk = await remuxer.read()
+          recordClamps(chunk)
           if (chunk.data?.byteLength) {
             chunks.push(chunk.data)
             readMp4(state, chunk.data, true)
@@ -473,6 +529,8 @@ window.harness = {
           nonMonotonicDts,
           zeroDuration,
           buffered,
+          clampedAudioDts,
+          clampedVideoDts,
         }
       } finally { await remuxer.destroy() }
     }

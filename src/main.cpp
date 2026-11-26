@@ -162,11 +162,13 @@ typedef struct InitResult {
 typedef struct ReadResult {
   emscripten::val data;
   std::vector<SubtitleFragment> subtitles;
-  double offset;
-  double pts;
-  double duration;
-  bool cancelled;
-  bool finished;
+  double offset = 0;
+  double pts = 0;
+  double duration = 0;
+  bool cancelled = false;
+  bool finished = false;
+  uint32_t clamped_audio_dts = 0;
+  uint32_t clamped_video_dts = 0;
 } ReadResult;
 
 typedef struct ThumbnailReadResult {
@@ -244,6 +246,8 @@ public:
 
   int64_t last_video_dts = AV_NOPTS_VALUE;
   int64_t last_audio_dts = AV_NOPTS_VALUE;
+  uint32_t total_clamped_audio_dts = 0;
+  uint32_t total_clamped_video_dts = 0;
 
   int64_t currentOffset = 0;
   int64_t input_length = 0;
@@ -306,11 +310,22 @@ public:
   int64_t frag_pos = 0;
   double frag_seconds = 0;
   int64_t frag_max_pts = AV_NOPTS_VALUE;
-  AVPacket* pending_video = nullptr;
-  double pending_video_pts = 0;
-  int64_t pending_video_pos = 0;
-  double pending_video_seconds = 0;
-  AVRational pending_video_time_base = { 0, 1 };
+  struct PendingVideo {
+    AVPacket* packet = nullptr;
+    double pts = 0;
+    int64_t pos = 0;
+    double seconds = 0;
+    AVRational time_base = { 0, 1 };
+
+    void reset() {
+      av_packet_free(&packet);
+      pts = 0;
+      pos = 0;
+      seconds = 0;
+      time_base = { 0, 1 };
+    }
+  };
+  PendingVideo pending_video;
   AVPacket* pending_audio = nullptr;
 
   /**
@@ -368,9 +383,9 @@ public:
 
   /** names from `audio_passthrough_name` that the caller's browser will accept in an mp4 */
   std::set<std::string> browser_audio_codecs;
-  /** set between write_header and the delayed moov reaching avio_write */
+  /** set between write_header and the delayed moov finishing in avio_write_data_type */
   bool header_pending = false;
-  /** set by seek() with delay_moov so its rebuilt init segment is dropped, matching non-delayed seeks */
+  /** set by seek() with delay_moov so every AVIO_DATA_MARKER_HEADER chunk of its rebuilt init segment is dropped */
   bool drop_pending_header = false;
 
   /**
@@ -1117,25 +1132,34 @@ public:
     drop_pending_header = false;
     last_video_dts = AV_NOPTS_VALUE;
     last_audio_dts = AV_NOPTS_VALUE;
-    uint8_t* output_avio_buffer = (uint8_t*)av_malloc(buffer_size);
-    // args after the buffer size: 1 = write flag, this = opaque, nullptr = no read, avio_write = custom write, nullptr = no seek
+    total_clamped_audio_dts = 0;
+    total_clamped_video_dts = 0;
+    // Keep the non-seekable output buffer large enough for movenc update_size() calls on moov/moof
+    // even when a caller sets a small demuxer read-ahead bufferSize.
+    static constexpr int MIN_OUTPUT_BUFFER_SIZE = 256 * 1024;
+    const int output_buffer_size = std::max(buffer_size, MIN_OUTPUT_BUFFER_SIZE);
+    uint8_t* output_avio_buffer = (uint8_t*)av_malloc(output_buffer_size);
+    // args after the buffer size: 1 = write flag, this = opaque, nullptr = no read/write_packet/seek (write_data_type below)
     output_avio_context = avio_alloc_context(
       output_avio_buffer,
-      buffer_size,
+      output_buffer_size,
       1,
       this,
       nullptr,
-      avio_write,
+      nullptr,
       nullptr
     );
+    output_avio_context->write_data_type = avio_write_data_type;
 
     avformat_alloc_output_context2(&output_format_context, NULL, "mp4", NULL);
     output_format_context->pb = output_avio_context;
   }
 
   void destroy_output() {
-    av_packet_free(&pending_video);
+    pending_video.reset();
     av_packet_free(&pending_audio);
+    header_pending = false;
+    drop_pending_header = false;
     if (output_avio_context) {
       av_free(output_avio_context->buffer);
       output_avio_context->buffer = nullptr;
@@ -1521,12 +1545,8 @@ public:
     frag_pos = 0;
     frag_seconds = 0;
     frag_max_pts = AV_NOPTS_VALUE;
-    av_packet_free(&pending_video);
+    pending_video.reset();
     av_packet_free(&pending_audio);
-    pending_video_pts = 0;
-    pending_video_pos = 0;
-    pending_video_seconds = 0;
-    pending_video_time_base = { 0, 1 };
     frag_closed = false;
     closed_pts = 0;
     closed_pos = 0;
@@ -1927,51 +1947,72 @@ public:
     return result;
   }
 
-  int flush_pending_audio(int64_t next_dts) {
-    if (!pending_audio) return 0;
+  static void set_lookahead_duration(AVPacket* pkt, int64_t next_dts) {
     if (
       next_dts != AV_NOPTS_VALUE &&
-      pending_audio->dts != AV_NOPTS_VALUE &&
-      next_dts > pending_audio->dts &&
-      (uint64_t)next_dts - (uint64_t)pending_audio->dts <= (uint64_t)INT_MAX
+      pkt->dts != AV_NOPTS_VALUE &&
+      next_dts > pkt->dts &&
+      (uint64_t)next_dts - (uint64_t)pkt->dts <= (uint64_t)INT_MAX
     ) {
-      pending_audio->duration = next_dts - pending_audio->dts;
+      pkt->duration = next_dts - pkt->dts;
     }
+  }
+
+  static void clamp_monotonic_dts(
+    AVPacket* pkt,
+    int64_t& last_dts,
+    uint32_t& read_clamps,
+    uint32_t& total_clamps,
+    const char* kind
+  ) {
+    if (pkt->dts == AV_NOPTS_VALUE) return;
+    if (last_dts != AV_NOPTS_VALUE && pkt->dts <= last_dts) {
+      const int64_t original_dts = pkt->dts;
+      // the mp4 muxer rejects non-monotonic dts, so force it forward and clamp pts up to match
+      pkt->dts = last_dts + 1;
+      if (pkt->pts != AV_NOPTS_VALUE && pkt->pts < pkt->dts) {
+        pkt->pts = pkt->dts;
+      }
+      read_clamps++;
+      total_clamps++;
+      if (total_clamps == 1) {
+        printf("WARN: clamped non-monotonic %s DTS (%lld -> %lld)\n", kind, (long long)original_dts, (long long)pkt->dts);
+      }
+    }
+    last_dts = pkt->dts;
+  }
+
+  int flush_pending_audio(int64_t next_dts) {
+    if (!pending_audio) return 0;
+    set_lookahead_duration(pending_audio, next_dts);
     int ret = av_interleaved_write_frame(output_format_context, pending_audio);
     av_packet_free(&pending_audio);
     return ret;
   }
 
   int flush_pending_video(int64_t next_dts) {
-    if (!pending_video) return 0;
-    if (
-      next_dts != AV_NOPTS_VALUE &&
-      pending_video->dts != AV_NOPTS_VALUE &&
-      next_dts > pending_video->dts &&
-      (uint64_t)next_dts - (uint64_t)pending_video->dts <= (uint64_t)INT_MAX
-    ) {
-      pending_video->duration = next_dts - pending_video->dts;
-    }
+    if (!pending_video.packet) return 0;
+    set_lookahead_duration(pending_video.packet, next_dts);
     if (!frag_open) {
       frag_open = true;
-      frag_pts = pending_video_pts;
-      frag_pos = pending_video_pos;
+      frag_pts = pending_video.pts;
+      frag_pos = pending_video.pos;
       frag_seconds = 0;
       frag_max_pts = AV_NOPTS_VALUE;
     }
     const double step_seconds =
-      pending_video->duration > 0 && pending_video_time_base.den > 0
-        ? pending_video->duration * av_q2d(pending_video_time_base)
-        : pending_video_seconds;
+      pending_video.packet->duration > 0 && pending_video.time_base.den > 0
+        ? pending_video.packet->duration * av_q2d(pending_video.time_base)
+        : pending_video.seconds;
     frag_seconds += step_seconds;
     if (
-      pending_video->pts != AV_NOPTS_VALUE &&
-      (frag_max_pts == AV_NOPTS_VALUE || pending_video->pts > frag_max_pts)
+      pending_video.packet->pts != AV_NOPTS_VALUE &&
+      (frag_max_pts == AV_NOPTS_VALUE || pending_video.packet->pts > frag_max_pts)
     ) {
-      frag_max_pts = pending_video->pts;
+      frag_max_pts = pending_video.packet->pts;
     }
-    int ret = av_interleaved_write_frame(output_format_context, pending_video);
-    av_packet_free(&pending_video);
+    int ret = av_interleaved_write_frame(output_format_context, pending_video.packet);
+    pending_video.reset();
     return ret;
   }
 
@@ -1985,6 +2026,8 @@ public:
     frag_closed = false;
 
     bool finished = false;
+    uint32_t read_clamped_audio_dts = 0;
+    uint32_t read_clamped_video_dts = 0;
 
     while (true) {
       packet = av_packet_alloc();
@@ -2082,16 +2125,7 @@ public:
         } else {
           av_packet_rescale_ts(packet, in_stream->time_base, out_stream->time_base);
 
-          if (packet->dts != AV_NOPTS_VALUE) {
-            if (last_audio_dts != AV_NOPTS_VALUE && packet->dts <= last_audio_dts) {
-              // the mp4 muxer rejects non-monotonic dts, so force it forward and clamp pts up to match
-              packet->dts = last_audio_dts + 1;
-              if (packet->pts != AV_NOPTS_VALUE && packet->pts < packet->dts) {
-                packet->pts = packet->dts;
-              }
-            }
-            last_audio_dts = packet->dts;
-          }
+          clamp_monotonic_dts(packet, last_audio_dts, read_clamped_audio_dts, total_clamped_audio_dts, "audio");
 
           if ((ret = flush_pending_audio(packet->dts)) < 0) {
             printf("ERROR: could not write interleaved frame | %s \n", av_err2str(ret));
@@ -2114,15 +2148,7 @@ public:
       duration += packet_seconds;
       av_packet_rescale_ts(packet, in_stream->time_base, out_stream->time_base);
 
-      if (packet->dts != AV_NOPTS_VALUE) {
-        if (last_video_dts != AV_NOPTS_VALUE && packet->dts <= last_video_dts) {
-          packet->dts = last_video_dts + 1;
-          if (packet->pts != AV_NOPTS_VALUE && packet->pts < packet->dts) {
-            packet->pts = packet->dts;
-          }
-        }
-        last_video_dts = packet->dts;
-      }
+      clamp_monotonic_dts(packet, last_video_dts, read_clamped_video_dts, total_clamped_video_dts, "video");
 
       if (packet->pts == AV_NOPTS_VALUE && packet->dts != AV_NOPTS_VALUE) {
         packet->pts = packet->dts;
@@ -2193,11 +2219,7 @@ public:
         frag_max_pts = AV_NOPTS_VALUE;
       }
 
-      pending_video = packet;
-      pending_video_pts = packet_pts_seconds;
-      pending_video_pos = packet_pos;
-      pending_video_seconds = packet_seconds;
-      pending_video_time_base = out_stream->time_base;
+      pending_video = { packet, packet_pts_seconds, packet_pos, packet_seconds, out_stream->time_base };
       packet = nullptr;
 
       if (wrote) {
@@ -2235,6 +2257,8 @@ public:
     frag_closed = false;
     result.cancelled = false;
     result.finished = finished;
+    result.clamped_audio_dts = read_clamped_audio_dts;
+    result.clamped_video_dts = read_clamped_video_dts;
 
     read_data_function = val::undefined();
     return result;
@@ -2277,7 +2301,7 @@ public:
     write_header();
     initializing = false;
     write_vector.clear();
-    // With delay_moov, write_header() emitted nothing yet; drop its delayed ftyp+moov on the first write
+    // With delay_moov, write_header() emitted nothing yet; drop its delayed ftyp+moov marker chunks
     // so seek() emits media segments only, matching every other codec.
     drop_pending_header = header_pending;
     subtitles.clear();
@@ -2427,37 +2451,31 @@ private:
     }
   }
 
-  static int avio_write_impl(void* opaque, const uint8_t* buf, int buf_size) {
+  /*
+   * movenc marks every write of ftyp+moov with AVIO_DATA_MARKER_HEADER (both non-delayed write_header
+   * and delayed mov_flush_fragment), and switches to SYNC_POINT / BOUNDARY_POINT / TRAILER before
+   * emitting moof+mdat or mfra. Classifying by marker handles delayed headers spanning any number of
+   * writes without setting wrote early on init() or leaking trailing header bytes on seek().
+   */
+  static int avio_write_data_type(
+    void* opaque,
+    const uint8_t* buf,
+    int buf_size,
+    AVIODataMarkerType type,
+    int64_t /*time*/
+  ) {
     Remuxer* self = reinterpret_cast<Remuxer*>(opaque);
-
-    /*
-     * A delayed moov arrives here as an ordinary write, and it must NOT end the read that produced it.
-     *
-     * `wrote` is what breaks the read loop, so counting the header as a fragment returned ftyp+moov on its
-     * own and pushed the media a call later, which then merged two fragments into one read. Swallowing
-     * exactly the first write after the header lets the read carry on to a real fragment boundary, so a
-     * caller still gets one appendable block.
-     */
-    if (self->header_pending) {
-      self->header_pending = false;
-      if (self->drop_pending_header) {
-        self->drop_pending_header = false;
-        return buf_size;
-      }
-    } else {
-      self->wrote = true;
+    if (buf_size <= 0) return buf_size;
+    if (type == AVIO_DATA_MARKER_HEADER) {
+      if (self->drop_pending_header) return buf_size;
+      self->write_vector.insert(self->write_vector.end(), buf, buf + buf_size);
+      return buf_size;
     }
+    self->header_pending = false;
+    self->drop_pending_header = false;
+    self->wrote = true;
     self->write_vector.insert(self->write_vector.end(), buf, buf + buf_size);
-
     return buf_size;
-  }
-
-  #if LIBAVFORMAT_VERSION_MAJOR >= 59
-  static int avio_write(void* opaque, const uint8_t* buf, int buf_size) {
-  #else
-  static int avio_write(void* opaque, uint8_t* buf, int buf_size) {
-  #endif
-    return avio_write_impl(opaque, buf, buf_size);
   }
 };
 
@@ -2524,13 +2542,15 @@ EMSCRIPTEN_BINDINGS(libav_wasm_simplified) {
     .field("timestampOffset", &InitResult::timestamp_offset);
 
   emscripten::value_object<ReadResult>("ReadResult")
-    .field("data",      &ReadResult::data)
-    .field("subtitles", &ReadResult::subtitles)
-    .field("offset",    &ReadResult::offset)
-    .field("pts",       &ReadResult::pts)
-    .field("duration",  &ReadResult::duration)
-    .field("cancelled", &ReadResult::cancelled)
-    .field("finished",  &ReadResult::finished);
+    .field("data",            &ReadResult::data)
+    .field("subtitles",       &ReadResult::subtitles)
+    .field("offset",          &ReadResult::offset)
+    .field("pts",             &ReadResult::pts)
+    .field("duration",        &ReadResult::duration)
+    .field("cancelled",       &ReadResult::cancelled)
+    .field("finished",        &ReadResult::finished)
+    .field("clampedAudioDts", &ReadResult::clamped_audio_dts)
+    .field("clampedVideoDts", &ReadResult::clamped_video_dts);
 
   emscripten::value_object<ThumbnailReadResult>("ThumbnailReadResult")
     .field("data",      &ThumbnailReadResult::data)

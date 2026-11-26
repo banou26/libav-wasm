@@ -154,6 +154,8 @@ export interface RemuxerInstance {
     duration: number
     cancelled: boolean
     finished: boolean
+    clampedAudioDts: number
+    clampedVideoDts: number
   }>
   read: (read: WASMReadFunction) => Promise<{
     data: Uint8Array
@@ -163,6 +165,8 @@ export interface RemuxerInstance {
     duration: number
     cancelled: boolean
     finished: boolean
+    clampedAudioDts: number
+    clampedVideoDts: number
   }>
   initThumbnail: (read: WASMReadFunction) => Promise<ThumbnailInitResult>
   readKeyframe: (read: WASMReadFunction, timestamp: number) => Promise<ThumbnailReadResult>
@@ -217,6 +221,8 @@ export type Remuxer = {
     duration: number
     cancelled: boolean
     finished: boolean
+    clampedAudioDts: number
+    clampedVideoDts: number
   }>
   read: (read: WASMReadFunction) => Promise<{
     data: ArrayBuffer
@@ -226,6 +232,8 @@ export type Remuxer = {
     duration: number
     cancelled: boolean
     finished: boolean
+    clampedAudioDts: number
+    clampedVideoDts: number
   }>
   readKeyframe: (read: WASMReadFunction, timestamp: number) => Promise<{
     data: ArrayBuffer
@@ -422,7 +430,9 @@ const resolvers = {
           pts: result.pts,
           duration: result.duration,
           cancelled: result.cancelled,
-          finished: result.finished
+          finished: result.finished,
+          clampedAudioDts: result.clampedAudioDts,
+          clampedVideoDts: result.clampedVideoDts
         }
       }),
       read: (read) => _remuxer.read(read).then(result => {
@@ -444,7 +454,9 @@ const resolvers = {
           pts: result.pts,
           duration: result.duration,
           cancelled: result.cancelled,
-          finished: result.finished
+          finished: result.finished,
+          clampedAudioDts: result.clampedAudioDts,
+          clampedVideoDts: result.clampedVideoDts
         }
       }),
       readKeyframe: (read, timestamp) =>

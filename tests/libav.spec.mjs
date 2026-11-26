@@ -206,21 +206,68 @@ test.describe('remuxing', () => {
     }
   })
 
+  test('seeking with delayed moov handles headers larger than bufferSize across multiple avio_write calls', async ({ page }) => {
+    await open(page)
+    for (const [fixture, codecs] of [
+      ['h264-ac3.mkv', ['aac', 'ac3']],
+      ['h264-eac3.mkv', ['aac', 'eac3']],
+    ]) {
+      const normal = await page.evaluate(
+        ([name, audioCodecs]) => window.harness.seek(name, [12, 4], { audioCodecs }),
+        [fixture, codecs],
+      )
+      const small = await page.evaluate(
+        ([name, audioCodecs]) => window.harness.seek(name, [12, 4], { audioCodecs, bufferSize: 256 }),
+        [fixture, codecs],
+      )
+      expect(small.initHeaderBytes, `${fixture} test must exceed bufferSize=256`).toBeGreaterThan(256)
+      expect(small.initValidBoxes, `${fixture} init box framing corrupt`).toBe(true)
+      expect(small.initBoxes[0], `${fixture} init must start with ftyp`).toBe('ftyp')
+      expect(small.initBoxes, `${fixture} init must contain moov`).toContain('moov')
+      for (let i = 0; i < small.steps.length; i++) {
+        const step = small.steps[i]
+        expect(step.bytes, `${fixture} seek(${step.target}) produced no media bytes`).toBeGreaterThan(0)
+        expect(step.validBoxes, `${fixture} seek(${step.target}) corrupted MP4 box framing`).toBe(true)
+        expect(step.boxes, `${fixture} seek(${step.target}) must not re-emit ftyp`).not.toContain('ftyp')
+        expect(step.boxes, `${fixture} seek(${step.target}) must not re-emit moov`).not.toContain('moov')
+        expect(step.boxes[0], `${fixture} seek(${step.target}) must open on moof`).toBe('moof')
+        expect(step.sha256, `${fixture} seek(${step.target}) diverged from default bufferSize`).toBe(normal.steps[i].sha256)
+      }
+    }
+  })
+
   // Equal audio packet DTS values bypassed `<` (only catching strictly decreasing DTS) and the post-seek
   // guard turned off on the very first video keyframe, so lavf mux.c rejected audio frames with EINVAL.
   test('duplicate audio DTS packets after a keyframe or seek are clamped forward instead of dropped', async ({ page }) => {
     await open(page)
-    for (const target of [undefined, 2]) {
-      const result = await page.evaluate(
-        ([name, seekTarget]) => window.harness.duplicateAudioDts(name, { target: seekTarget }),
-        ['h264-aac.mkv', target],
-      )
-      expect(result.patched.audioCount, `target=${target}: audio packets were dropped`).toBe(result.baseline.audioCount)
-      expect(result.patched.audioCount).toBeGreaterThan(50)
-      expect(result.patched.nonMonotonicDts, `target=${target}: non-monotonic audio DTS`).toBe(0)
-      expect(result.patched.zeroDuration, `target=${target}: zero-duration audio sample`).toBe(0)
-      expect(typeof result.patched.buffered, `target=${target}: MSE rejected bytes: ${JSON.stringify(result.patched.buffered)}`).toBe('number')
-      expect(result.patched.buffered).toBeGreaterThan(0)
+    const consoleLogs = []
+    const onConsole = (msg) => consoleLogs.push(msg.text())
+    page.on('console', onConsole)
+    try {
+      for (const target of [undefined, 2]) {
+        const beforeCount = consoleLogs.length
+        const result = await page.evaluate(
+          ([name, seekTarget]) => window.harness.duplicateAudioDts(name, { target: seekTarget }),
+          ['h264-aac.mkv', target],
+        )
+        expect(result.patched.audioCount, `target=${target}: audio packets were dropped`).toBe(result.baseline.audioCount)
+        expect(result.patched.audioCount).toBeGreaterThan(50)
+        expect(result.patched.nonMonotonicDts, `target=${target}: non-monotonic audio DTS`).toBe(0)
+        expect(result.patched.zeroDuration, `target=${target}: zero-duration audio sample`).toBe(0)
+        expect(typeof result.patched.buffered, `target=${target}: MSE rejected bytes: ${JSON.stringify(result.patched.buffered)}`).toBe('number')
+        expect(result.patched.buffered).toBeGreaterThan(0)
+        expect(result.baseline.clampedAudioDts, `target=${target}: baseline should not clamp audio DTS`).toBe(0)
+        expect(result.baseline.clampedVideoDts, `target=${target}: baseline should not clamp video DTS`).toBe(0)
+        expect(result.patched.clampedAudioDts, `target=${target}: patched should report clamped audio DTS`).toBeGreaterThanOrEqual(1)
+        expect(result.patched.clampedVideoDts, `target=${target}: patched should not clamp video DTS`).toBe(0)
+        const runLogs = consoleLogs.slice(beforeCount)
+        expect(
+          runLogs.some((line) => line.includes('WARN: clamped non-monotonic audio DTS')),
+          `target=${target}: missing DTS clamp diagnostic log`,
+        ).toBe(true)
+      }
+    } finally {
+      page.off('console', onConsole)
     }
   })
 
