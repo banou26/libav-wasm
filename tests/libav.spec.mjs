@@ -206,7 +206,7 @@ test.describe('remuxing', () => {
     }
   })
 
-  test('seeking with delayed moov handles headers larger than bufferSize across multiple avio_write calls', async ({ page }) => {
+  test('seeking with delayed moov handles headers larger than bufferSize', async ({ page }) => {
     await open(page)
     for (const [fixture, codecs] of [
       ['h264-ac3.mkv', ['aac', 'ac3']],
@@ -216,12 +216,13 @@ test.describe('remuxing', () => {
         ([name, audioCodecs]) => window.harness.seek(name, [12, 4], { audioCodecs }),
         [fixture, codecs],
       )
+      expect(normal.initHeaderBytes, `${fixture} baseline header must exceed bufferSize=256`).toBeGreaterThan(256)
       const small = await page.evaluate(
         ([name, audioCodecs]) => window.harness.seek(name, [12, 4], { audioCodecs, bufferSize: 256 }),
         [fixture, codecs],
       )
-      expect(small.initHeaderBytes, `${fixture} test must exceed bufferSize=256`).toBeGreaterThan(256)
       expect(small.initValidBoxes, `${fixture} init box framing corrupt`).toBe(true)
+      expect(small.initHeaderBytes, `${fixture} init header byte count mismatch`).toBe(normal.initHeaderBytes)
       expect(small.initBoxes[0], `${fixture} init must start with ftyp`).toBe('ftyp')
       expect(small.initBoxes, `${fixture} init must contain moov`).toContain('moov')
       for (let i = 0; i < small.steps.length; i++) {
