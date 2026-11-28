@@ -1,4 +1,4 @@
-import { makeRemuxer, makeThumbnailer } from '/build/index.js'
+import { makeRemuxer, makeThumbnailer, supportedAudioCodecs } from '/build/index.js'
 
 const sourceFor = async (name) => {
   const { length } = await (await fetch(`/size?name=${encodeURIComponent(name)}`)).json()
@@ -167,6 +167,8 @@ const readMp4 = (state, buffer, collect) => {
 }
 
 window.harness = {
+  supportedAudioCodecs,
+
   /**
    * Where the bytes put each sample, with the init segment's `timestampOffset` added as a SourceBuffer would: from
    * the start of the file, or from a seek to `target`, over that call and `reads` more.

@@ -297,6 +297,35 @@ test.describe('remuxing', () => {
     await expectPlays('h264-aac71.mkv', 2)
     await expectPlays('h264-aac51.mkv', 6)
   })
+
+  test('supportedAudioCodecs and makeRemuxer probe ManagedMediaSource when MediaSource is absent', async ({ page }) => {
+    await open(page)
+    const result = await page.evaluate(async () => {
+      const msDesc = Object.getOwnPropertyDescriptor(window, 'MediaSource')
+      const mmsDesc = Object.getOwnPropertyDescriptor(window, 'ManagedMediaSource')
+      try {
+        delete window.MediaSource
+        window.ManagedMediaSource = {
+          isTypeSupported: (type) => type === 'audio/mp4; codecs="mp4a.40.2"',
+        }
+        const mmsOnly = window.harness.supportedAudioCodecs()
+        const remuxed = await window.harness.remux('vp9-opus.webm')
+
+        delete window.ManagedMediaSource
+        const neither = window.harness.supportedAudioCodecs()
+
+        return { mmsOnly, remuxAudioMimeType: remuxed.audioMimeType, neither }
+      } finally {
+        if (msDesc) Object.defineProperty(window, 'MediaSource', msDesc)
+        else delete window.MediaSource
+        if (mmsDesc) Object.defineProperty(window, 'ManagedMediaSource', mmsDesc)
+        else delete window.ManagedMediaSource
+      }
+    })
+    expect(result.mmsOnly).toEqual(['aac'])
+    expect(result.remuxAudioMimeType).toBe('mp4a.40.2')
+    expect(result.neither).toEqual(['aac', 'opus', 'flac'])
+  })
 })
 
 test.describe('chapters', () => {

@@ -2,6 +2,7 @@ import PQueue from 'p-queue'
 import type { Resolvers } from './worker'
 import type { SubtitleFragment } from './worker'
 
+import { MediaSource } from '@banou/ponyfill/media-source'
 import { expose, transfer } from 'osra'
 export * from './utils'
 
@@ -34,10 +35,8 @@ const DEFAULT_AUDIO_CODECS = ['aac', 'opus', 'flac']
  * audio, not as an error, which is far worse than a transcode that was not needed.
  */
 export const supportedAudioCodecs = (): string[] => {
-  const mediaSource = (globalThis as { MediaSource?: typeof MediaSource }).MediaSource
-  if (typeof mediaSource?.isTypeSupported !== 'function') return [...DEFAULT_AUDIO_CODECS]
   const supported = AUDIO_PROBES
-    .filter(([, type]) => { try { return mediaSource.isTypeSupported(type) } catch { return false } })
+    .filter(([, type]) => { try { return MediaSource.isTypeSupported(type) } catch { return false } })
     .map(([name]) => name)
   // a browser that says no to aac is answering wrong, not describing itself
   return supported.includes('aac') ? supported : [...DEFAULT_AUDIO_CODECS]

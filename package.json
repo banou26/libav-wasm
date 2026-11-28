@@ -33,6 +33,7 @@
     "test:large": "LIBAV_LARGE_FIXTURE=1 playwright test"
   },
   "devDependencies": {
+    "@banou/ponyfill": "^0.0.18",
     "@playwright/test": "^1.62.1",
     "@rollup/plugin-commonjs": "^24.0.1",
     "@types/emscripten": "^1.40.0",
